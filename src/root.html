@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ESP8266 Temp/Humidity Monitor</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: monospace;
+    }
+    body {
+      margin: 0;
+      padding: 16px;
+      background: #f2f2f2;
+      color: #111;
+    }
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    section {
+      margin-bottom: 16px;
+      padding: 12px;
+      border: 1px solid #bbb;
+      background: #fff;
+    }
+    h1, h2, h3, p {
+      margin-top: 0;
+    }
+    .graph-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .graph-panel {
+      margin: 0;
+      padding: 12px;
+      border: 1px solid #ccc;
+      background: #fcfcfc;
+    }
+    @media (max-width: 900px) {
+      .graph-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .graph-panel h3 {
+      margin-bottom: 6px;
+    }
+    .graph {
+      width: 100%;
+      height: 260px;
+      border: 1px solid #bbb;
+      background: #fafafa;
+    }
+    .value {
+      display: inline-block;
+      min-width: 10ch;
+    }
+    .hint {
+      color: #555;
+    }
+    .subtitle {
+      margin-top: -2px;
+      color: #555;
+      min-height: 2.4em;
+    }
+    code {
+      background: #eee;
+      padding: 0 4px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ESP8266 Temp/Humidity Monitor</h1>
+    <section>
+      <h2>Current</h2>
+      <p>
+        <span class="value">Temp: <strong id="temperature">--</strong> C</span>
+        <span class="value">Humidity: <strong id="humidity">--</strong> %</span>
+        <span class="value">Samples: <strong id="samples">--</strong></span>
+      </p>
+      <p class="hint">Data routes: <code>/raw/last</code>, <code>/raw/all</code>, <code>/last</code></p>
+    </section>
+    <section>
+      <h2>History Views</h2>
+      <p class="hint" id="graph-status">Loading history...</p>
+      <div class="graph-grid">
+        <article class="graph-panel">
+          <h3>Last Minute</h3>
+          <p class="subtitle" id="summary-minute">Avg Temp -- | Avg Humidity -- | Samples --</p>
+          <canvas class="graph" id="graph-minute" width="520" height="260"></canvas>
+        </article>
+        <article class="graph-panel">
+          <h3>Last 5 Minutes</h3>
+          <p class="subtitle" id="summary-five-minutes">Avg Temp -- | Avg Humidity -- | Samples --</p>
+          <canvas class="graph" id="graph-five-minutes" width="520" height="260"></canvas>
+        </article>
+        <article class="graph-panel">
+          <h3>Last 15 Minutes</h3>
+          <p class="subtitle" id="summary-fifteen-minutes">Avg Temp -- | Avg Humidity -- | Samples --</p>
+          <canvas class="graph" id="graph-fifteen-minutes" width="520" height="260"></canvas>
+        </article>
+        <article class="graph-panel">
+          <h3>All History</h3>
+          <p class="subtitle" id="summary-all">Avg Temp -- | Avg Humidity -- | Samples --</p>
+          <canvas class="graph" id="graph-all" width="520" height="260"></canvas>
+        </article>
+      </div>
+    </section>
+  </main>
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const graphConfigs = [
+      {
+        key: 'minute',
+        canvasId: 'graph-minute',
+        summaryId: 'summary-minute',
+        windowMs: 60 * 1000,
+      },
+      {
+        key: 'five-minutes',
+        canvasId: 'graph-five-minutes',
+        summaryId: 'summary-five-minutes',
+        windowMs: 5 * 60 * 1000,
+      },
+      {
+        key: 'fifteen-minutes',
+        canvasId: 'graph-fifteen-minutes',
+        summaryId: 'summary-fifteen-minutes',
+        windowMs: 15 * 60 * 1000,
+      },
+      {
+        key: 'all',
+        canvasId: 'graph-all',
+        summaryId: 'summary-all',
+        windowMs: null,
+      }
+    ];
+    const graphStates = {};
+
+    let historyEntries = [];
+    let latestCurrentTimestamp = NaN;
+    let latestCurrentWallClockMs = NaN;
+
+    graphConfigs.forEach((config) => {
+      graphStates[config.key] = {
+        hoverIndex: -1,
+        hoverMouseX: 0,
+        hoverMouseY: 0,
+      };
+    });
+
+    function normalizeApiBase(value) {
+      if (typeof value !== 'string') {
+        return '';
+      }
+
+      const trimmed = value.trim();
+      if (trimmed === '') {
+        return '';
+      }
+
+      return trimmed.replace(/\/+$/, '');
+    }
+
+    function getApiBase() {
+      const override = normalizeApiBase(urlParams.get('apiBase'));
+      if (override !== '') {
+        try {
+          window.localStorage.setItem('esp8266-temp-monitor-api-base', override);
+        } catch (error) {
+        }
+        return override;
+      }
+
+      if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+        return '';
+      }
+
+      try {
+        const stored = normalizeApiBase(window.localStorage.getItem('esp8266-temp-monitor-api-base'));
+        if (stored !== '') {
+          return stored;
+        }
+      } catch (error) {
+      }
+
+      return '';
+    }
+
+    const apiBase = getApiBase();
+
+    function apiUrl(path) {
+      return apiBase === '' ? path : apiBase + path;
+    }
+
+    async function fetchText(path) {
+      const response = await fetch(apiUrl(path), {cache: 'no-store'});
+      if (!response.ok) {
+        throw new Error(path + ' => ' + response.status);
+      }
+      return response.text();
+    }
+
+    function normalizeEntries(entries) {
+      const ordered = entries
+        .slice()
+        .sort((left, right) => left.timestamp - right.timestamp);
+      const normalized = [];
+
+      ordered.forEach((entry) => {
+        const lastEntry = normalized[normalized.length - 1];
+        if (lastEntry && lastEntry.timestamp === entry.timestamp) {
+          normalized[normalized.length - 1] = entry;
+        } else {
+          normalized.push(entry);
+        }
+      });
+
+      return normalized;
+    }
+
+    function parseRows(text) {
+      const lines = text.trim().split(/\r?\n/).filter(Boolean);
+      const entries = lines.map((line) => {
+        const parts = line.split(',');
+        return {
+          timestamp: Number(parts[0]),
+          temperature: Number(parts[1]),
+          humidity: Number(parts[2]),
+        };
+      }).filter((entry) =>
+        Number.isFinite(entry.timestamp) &&
+        Number.isFinite(entry.temperature) &&
+        Number.isFinite(entry.humidity)
+      );
+
+      return normalizeEntries(entries);
+    }
+
+    function upsertEntry(entry) {
+      let left = 0;
+      let right = historyEntries.length;
+
+      while (left < right) {
+        const middle = (left + right) >> 1;
+        if (historyEntries[middle].timestamp < entry.timestamp) {
+          left = middle + 1;
+        } else {
+          right = middle;
+        }
+      }
+
+      if (left < historyEntries.length && historyEntries[left].timestamp === entry.timestamp) {
+        historyEntries[left] = entry;
+      } else {
+        historyEntries.splice(left, 0, entry);
+      }
+    }
+
+    function pad2(value) {
+      return String(value).padStart(2, '0');
+    }
+
+    function clamp(value, minValue, maxValue) {
+      return Math.max(minValue, Math.min(maxValue, value));
+    }
+
+    function formatWallClock(timestamp) {
+      if (!Number.isFinite(latestCurrentTimestamp) || !Number.isFinite(latestCurrentWallClockMs)) {
+        return 'uptime ' + (timestamp / 1000).toFixed(1) + ' s';
+      }
+
+      const inferredMs = latestCurrentWallClockMs - (latestCurrentTimestamp - timestamp);
+      const date = new Date(inferredMs);
+      return (
+        String(date.getFullYear()) +
+        '-' +
+        pad2(date.getMonth() + 1) +
+        '-' +
+        pad2(date.getDate()) +
+        ' ' +
+        pad2(date.getHours()) +
+        ':' +
+        pad2(date.getMinutes()) +
+        ':' +
+        pad2(date.getSeconds())
+      );
+    }
+
+    function getAnchorTimestamp() {
+      if (Number.isFinite(latestCurrentTimestamp)) {
+        return latestCurrentTimestamp;
+      }
+
+      if (historyEntries.length === 0) {
+        return NaN;
+      }
+
+      return historyEntries[historyEntries.length - 1].timestamp;
+    }
+
+    function entriesForWindow(windowMs) {
+      if (windowMs == null) {
+        return historyEntries.slice();
+      }
+
+      const anchorTimestamp = getAnchorTimestamp();
+      if (!Number.isFinite(anchorTimestamp)) {
+        return [];
+      }
+
+      const earliestTimestamp = anchorTimestamp - windowMs;
+      return historyEntries.filter((entry) => entry.timestamp >= earliestTimestamp);
+    }
+
+    function formatSummary(entries) {
+      if (entries.length === 0) {
+        return 'No samples in this range yet.';
+      }
+
+      let sumTemperature = 0;
+      let sumHumidity = 0;
+
+      entries.forEach((entry) => {
+        sumTemperature += entry.temperature;
+        sumHumidity += entry.humidity;
+      });
+
+      return (
+        'Avg Temp ' + (sumTemperature / entries.length).toFixed(2) + ' C | ' +
+        'Avg Humidity ' + (sumHumidity / entries.length).toFixed(2) + ' % | ' +
+        'Samples ' + entries.length
+      );
+    }
+
+    function drawEmptyGraph(canvas, message) {
+      const ctx = prepareCanvasContext(canvas);
+      const width = canvas.clientWidth || canvas.width;
+      const height = canvas.clientHeight || canvas.height;
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = '#fafafa';
+      ctx.fillRect(0, 0, width, height);
+      ctx.strokeStyle = '#ddd';
+      ctx.strokeRect(0, 0, width, height);
+      ctx.fillStyle = '#555';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = '14px monospace';
+      ctx.fillText(message, width / 2, height / 2);
+    }
+
+    function prepareCanvasContext(canvas) {
+      const cssWidth = canvas.clientWidth || canvas.width;
+      const cssHeight = canvas.clientHeight || canvas.height;
+      const devicePixelRatio = window.devicePixelRatio || 1;
+      const displayWidth = Math.max(1, Math.round(cssWidth * devicePixelRatio));
+      const displayHeight = Math.max(1, Math.round(cssHeight * devicePixelRatio));
+
+      if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+        canvas.width = displayWidth;
+        canvas.height = displayHeight;
+      }
+
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+      return ctx;
+    }
+
+    function drawGraph(config, entries) {
+      const canvas = document.getElementById(config.canvasId);
+      const ctx = prepareCanvasContext(canvas);
+      const width = canvas.clientWidth || canvas.width;
+      const height = canvas.clientHeight || canvas.height;
+      const marginLeft = 40;
+      const marginRight = 20;
+      const marginTop = 20;
+      const marginBottom = 34;
+      const state = graphStates[config.key];
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = '#fafafa';
+      ctx.fillRect(0, 0, width, height);
+      ctx.strokeStyle = '#ddd';
+      ctx.strokeRect(0, 0, width, height);
+
+      if (entries.length < 2) {
+        drawEmptyGraph(canvas, 'Not enough samples for a graph yet.');
+        return;
+      }
+
+      let minValue = Infinity;
+      let maxValue = -Infinity;
+      entries.forEach((entry) => {
+        minValue = Math.min(minValue, entry.temperature, entry.humidity);
+        maxValue = Math.max(maxValue, entry.temperature, entry.humidity);
+      });
+      if (minValue === maxValue) {
+        minValue -= 1;
+        maxValue += 1;
+      }
+
+      const firstTime = entries[0].timestamp;
+      const lastTime = entries[entries.length - 1].timestamp;
+      const timeSpan = Math.max(1, lastTime - firstTime);
+      const valueSpan = maxValue - minValue;
+
+      function xFor(entry) {
+        return marginLeft + (entry.timestamp - firstTime) * (width - marginLeft - marginRight) / timeSpan;
+      }
+
+      function yFor(value) {
+        return height - marginBottom - (value - minValue) * (height - marginTop - marginBottom) / valueSpan;
+      }
+
+      ctx.strokeStyle = '#bbb';
+      ctx.beginPath();
+      ctx.moveTo(marginLeft, marginTop);
+      ctx.lineTo(marginLeft, height - marginBottom);
+      ctx.lineTo(width - marginRight, height - marginBottom);
+      ctx.stroke();
+
+      ctx.fillStyle = '#444';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+      ctx.font = '12px monospace';
+      ctx.fillText(minValue.toFixed(1), 4, height - marginBottom + 12);
+      ctx.fillText(maxValue.toFixed(1), 4, marginTop + 4);
+      ctx.fillText(formatWallClock(firstTime), marginLeft, height - 8);
+      ctx.textAlign = 'right';
+      ctx.fillText(formatWallClock(lastTime), width - marginRight, height - 8);
+
+      ctx.strokeStyle = '#c62828';
+      ctx.beginPath();
+      entries.forEach((entry, index) => {
+        const x = xFor(entry);
+        const y = yFor(entry.temperature);
+        if (index === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+
+      ctx.strokeStyle = '#1565c0';
+      ctx.beginPath();
+      entries.forEach((entry, index) => {
+        const x = xFor(entry);
+        const y = yFor(entry.humidity);
+        if (index === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+
+      if (state.hoverIndex >= 0 && state.hoverIndex < entries.length) {
+        const hoveredEntry = entries[state.hoverIndex];
+        const hoverX = xFor(hoveredEntry);
+        const hoverTempY = yFor(hoveredEntry.temperature);
+        const hoverHumidY = yFor(hoveredEntry.humidity);
+        const tooltipLines = [
+          formatWallClock(hoveredEntry.timestamp),
+          'T ' + hoveredEntry.temperature.toFixed(2) + ' C',
+          'H ' + hoveredEntry.humidity.toFixed(2) + ' %'
+        ];
+        const tooltipPadding = 6;
+        const tooltipLineHeight = 14;
+        let tooltipWidth = 0;
+
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = '#666';
+        ctx.beginPath();
+        ctx.moveTo(hoverX, marginTop);
+        ctx.lineTo(hoverX, height - marginBottom);
+        ctx.stroke();
+        ctx.restore();
+
+        ctx.fillStyle = '#c62828';
+        ctx.beginPath();
+        ctx.arc(hoverX, hoverTempY, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#1565c0';
+        ctx.beginPath();
+        ctx.arc(hoverX, hoverHumidY, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.font = '12px monospace';
+        ctx.textAlign = 'left';
+        tooltipLines.forEach((line) => {
+          tooltipWidth = Math.max(tooltipWidth, ctx.measureText(line).width);
+        });
+
+        const tooltipHeight = tooltipPadding * 2 + tooltipLineHeight * tooltipLines.length;
+        const tooltipX = clamp(state.hoverMouseX + 12, 4, width - tooltipWidth - tooltipPadding * 2 - 4);
+        const tooltipY = clamp(state.hoverMouseY - tooltipHeight - 12, 4, height - tooltipHeight - 4);
+
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.82)';
+        ctx.fillRect(tooltipX, tooltipY, tooltipWidth + tooltipPadding * 2, tooltipHeight);
+        ctx.strokeStyle = 'rgba(80, 80, 80, 0.6)';
+        ctx.strokeRect(tooltipX, tooltipY, tooltipWidth + tooltipPadding * 2, tooltipHeight);
+        ctx.fillStyle = '#222';
+        tooltipLines.forEach((line, index) => {
+          ctx.fillText(line, tooltipX + tooltipPadding, tooltipY + tooltipPadding + 11 + index * tooltipLineHeight);
+        });
+      }
+    }
+
+    function drawAllGraphs() {
+      graphConfigs.forEach((config) => {
+        const entries = entriesForWindow(config.windowMs);
+        document.getElementById(config.summaryId).textContent = formatSummary(entries);
+        drawGraph(config, entries);
+      });
+    }
+
+    function updateHoverFromMouse(config, event) {
+      const canvas = document.getElementById(config.canvasId);
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = (event.clientX - rect.left) * canvas.width / rect.width;
+      const mouseY = (event.clientY - rect.top) * canvas.height / rect.height;
+      const entries = entriesForWindow(config.windowMs);
+      const state = graphStates[config.key];
+      const marginLeft = 40;
+      const marginRight = 20;
+      const marginTop = 20;
+      const marginBottom = 34;
+
+      state.hoverMouseX = mouseX;
+      state.hoverMouseY = mouseY;
+
+      if (
+        entries.length < 2 ||
+        mouseX < marginLeft ||
+        mouseX > canvas.width - marginRight ||
+        mouseY < marginTop ||
+        mouseY > canvas.height - marginBottom
+      ) {
+        state.hoverIndex = -1;
+        drawGraph(config, entries);
+        return;
+      }
+
+      const firstTime = entries[0].timestamp;
+      const lastTime = entries[entries.length - 1].timestamp;
+      const timeSpan = Math.max(1, lastTime - firstTime);
+      let bestIndex = 0;
+      let bestDistance = Infinity;
+
+      entries.forEach((entry, index) => {
+        const x = marginLeft + (entry.timestamp - firstTime) * (canvas.width - marginLeft - marginRight) / timeSpan;
+        const distance = Math.abs(x - mouseX);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestIndex = index;
+        }
+      });
+
+      state.hoverIndex = bestIndex;
+      drawGraph(config, entries);
+    }
+
+    function initializeGraphInteraction() {
+      graphConfigs.forEach((config) => {
+        const canvas = document.getElementById(config.canvasId);
+        const state = graphStates[config.key];
+
+        canvas.addEventListener('mousemove', (event) => {
+          updateHoverFromMouse(config, event);
+        });
+        canvas.addEventListener('mouseleave', () => {
+          state.hoverIndex = -1;
+          drawGraph(config, entriesForWindow(config.windowMs));
+        });
+      });
+    }
+
+    async function refreshCurrent() {
+      const entries = parseRows(await fetchText('/raw/last'));
+      if (entries.length === 0) {
+        throw new Error('No current data');
+      }
+
+      const entry = entries[0];
+      latestCurrentTimestamp = entry.timestamp;
+      latestCurrentWallClockMs = Date.now();
+
+      upsertEntry(entry);
+
+      document.getElementById('temperature').textContent = entry.temperature.toFixed(1);
+      document.getElementById('humidity').textContent = entry.humidity.toFixed(1);
+      document.getElementById('samples').textContent = String(historyEntries.length);
+      document.getElementById('graph-status').textContent = 'Red = temperature (C), blue = humidity (%); each graph uses raw sample timestamps on the x-axis.';
+      drawAllGraphs();
+    }
+
+    async function refreshHistory() {
+      historyEntries = parseRows(await fetchText('/raw/all'));
+      if (historyEntries.length > 0) {
+        const entry = historyEntries[historyEntries.length - 1];
+        document.getElementById('temperature').textContent = entry.temperature.toFixed(1);
+        document.getElementById('humidity').textContent = entry.humidity.toFixed(1);
+        document.getElementById('graph-status').textContent = 'History loaded; waiting for latest sample to anchor wall-clock time.';
+      }
+      document.getElementById('samples').textContent = String(historyEntries.length);
+      drawAllGraphs();
+    }
+
+    async function initializePage() {
+      try {
+        await refreshHistory();
+        await refreshCurrent();
+      } catch (error) {
+        document.getElementById('graph-status').textContent = String(error);
+      }
+    }
+
+    initializeGraphInteraction();
+    initializePage();
+    window.addEventListener('resize', () => {
+      drawAllGraphs();
+    });
+    setInterval(() => {
+      refreshCurrent().catch((error) => {
+        document.getElementById('graph-status').textContent = String(error);
+      });
+    }, 3000);
+  </script>
+</body>
+</html>
