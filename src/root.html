@@ -117,25 +117,25 @@
         key: 'minute',
         canvasId: 'graph-minute',
         summaryId: 'summary-minute',
-        windowMs: 60 * 1000,
+        windowSeconds: 60,
       },
       {
         key: 'five-minutes',
         canvasId: 'graph-five-minutes',
         summaryId: 'summary-five-minutes',
-        windowMs: 5 * 60 * 1000,
+        windowSeconds: 5 * 60,
       },
       {
         key: 'fifteen-minutes',
         canvasId: 'graph-fifteen-minutes',
         summaryId: 'summary-fifteen-minutes',
-        windowMs: 15 * 60 * 1000,
+        windowSeconds: 15 * 60,
       },
       {
         key: 'all',
         canvasId: 'graph-all',
         summaryId: 'summary-all',
-        windowMs: null,
+        windowSeconds: null,
       }
     ];
     const graphStates = {};
@@ -270,10 +270,10 @@
 
     function formatWallClock(timestamp) {
       if (!Number.isFinite(latestCurrentTimestamp) || !Number.isFinite(latestCurrentWallClockMs)) {
-        return 'uptime ' + (timestamp / 1000).toFixed(1) + ' s';
+        return 'uptime ' + timestamp.toFixed(0) + ' s';
       }
 
-      const inferredMs = latestCurrentWallClockMs - (latestCurrentTimestamp - timestamp);
+      const inferredMs = latestCurrentWallClockMs - (latestCurrentTimestamp - timestamp) * 1000;
       const date = new Date(inferredMs);
       return (
         String(date.getFullYear()) +
@@ -302,8 +302,8 @@
       return historyEntries[historyEntries.length - 1].timestamp;
     }
 
-    function entriesForWindow(windowMs) {
-      if (windowMs == null) {
+    function entriesForWindow(windowSeconds) {
+      if (windowSeconds == null) {
         return historyEntries.slice();
       }
 
@@ -312,7 +312,7 @@
         return [];
       }
 
-      const earliestTimestamp = anchorTimestamp - windowMs;
+      const earliestTimestamp = anchorTimestamp - windowSeconds;
       return historyEntries.filter((entry) => entry.timestamp >= earliestTimestamp);
     }
 
@@ -515,7 +515,7 @@
 
     function drawAllGraphs() {
       graphConfigs.forEach((config) => {
-        const entries = entriesForWindow(config.windowMs);
+        const entries = entriesForWindow(config.windowSeconds);
         document.getElementById(config.summaryId).textContent = formatSummary(entries);
         drawGraph(config, entries);
       });
@@ -526,7 +526,7 @@
       const rect = canvas.getBoundingClientRect();
       const mouseX = (event.clientX - rect.left) * canvas.width / rect.width;
       const mouseY = (event.clientY - rect.top) * canvas.height / rect.height;
-      const entries = entriesForWindow(config.windowMs);
+      const entries = entriesForWindow(config.windowSeconds);
       const state = graphStates[config.key];
       const marginLeft = 40;
       const marginRight = 20;
@@ -577,7 +577,7 @@
         });
         canvas.addEventListener('mouseleave', () => {
           state.hoverIndex = -1;
-          drawGraph(config, entriesForWindow(config.windowMs));
+          drawGraph(config, entriesForWindow(config.windowSeconds));
         });
       });
     }
