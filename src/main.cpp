@@ -69,13 +69,9 @@ struct SensorRecord {
 };
 
 struct SensorHistory {
-  static int const MaxHistoryExpL0 = 5; /* 2s * 32, even secondly, for about a minute */
-  static int const MaxHistoryExpL1 = 6; /* 64s * 64, minutely, for about an hour */
-  static int const MaxHistoryExpL2 = 12; /* 4096s * 4096, hourly, for about 194 days */
-
-  static uint8_t const MaxHistoryL0 = 1 << MaxHistoryExpL0;
-  static uint8_t const MaxHistoryL1 = 1 << MaxHistoryExpL1;
-  static uint16_t const MaxHistoryL2 = 1 << MaxHistoryExpL2;
+  static uint8_t const MaxHistoryL0 = 1 << 5; /* 2s * 32, even secondly, for about a minute */
+  static uint8_t const MaxHistoryL1 = 1 << 6; /* 64s * 64, minutely, for about an hour */
+  static uint16_t const MaxHistoryL2 = 1 << 12; /* 4096s * 4096, hourly, for about 194 days */
 
   static uint8_t const RingMaskL0 = MaxHistoryL0 - 1;
   static uint8_t const RingMaskL1 = MaxHistoryL1 - 1;
@@ -145,10 +141,10 @@ struct SensorHistory {
         if (countL1 == MaxHistoryL1) {
           if (!headL1) {
             if (countL2 == MaxHistoryL2) {
-              entriesL2[headL2] = entriesL0[0];
+              entriesL2[headL2] = entriesL1[0];
               headL2 = (headL2 + 1) & RingMaskL2;
             } else {
-              entriesL2[(headL2 + countL2++) & RingMaskL2] = entriesL0[0];
+              entriesL2[(headL2 + countL2++) & RingMaskL2] = entriesL1[0];
             }
           }
           entriesL1[headL1] = entriesL0[0];
