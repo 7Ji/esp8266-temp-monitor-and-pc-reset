@@ -3,13 +3,6 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
 
-#define OneSecondAsMs 1'000
-#define BaudRate 115200
-
-char const HostName[] = PRIVATE_HOSTNAME;
-char const WiFiSSID[] = PRIVATE_WIFI_SSID;
-char const WiFiPassword[] = PRIVATE_WIFI_PASSWORD;
-
 #include "root.html.h"
 
 #ifdef PRIVATE_PIN_DHT11
@@ -19,9 +12,9 @@ DHT dht(D4, DHT11);
 #endif
 ESP8266WebServer server(80);
 
-char const ErrorStringWouldTruncate[] PROGMEM = "String Would Truncate";
-char const ErrorStringFormatFailure[] PROGMEM = "String Format Failure";
-char const ErrorNotFound[] PROGMEM = "Not Found";
+static char const ErrorStringWouldTruncate[] PROGMEM = "String Would Truncate";
+static char const ErrorStringFormatFailure[] PROGMEM = "String Format Failure";
+static char const ErrorNotFound[] PROGMEM = "Not Found";
 
 #define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 
@@ -239,6 +232,37 @@ void httpHandleNotFound() {
   server.send_P(404, "text/plain", ErrorNotFound, sizeof(ErrorNotFound) - 1);
 }
 
+bool serverIsAuthorized() {
+  static String const AuthExpected = String("Bearer " PRIVATE_PC_AUTH);
+  static String const HeaderAuthorization = String("Authorization");
+
+  if (!server.hasHeader(HeaderAuthorization)) {
+    return false;
+  }
+
+  return server.header(HeaderAuthorization) == AuthExpected;
+}
+
+static char const PcNotImplemented[] PROGMEM = "PC routes not implemented yet";
+
+void httpHandlePcPower() {
+  if (!serverIsAuthorized()) {
+    httpHandleNotFound();
+    return;
+  }
+
+  server.send_P(501, "text/plain", PcNotImplemented, sizeof(PcNotImplemented) - 1);
+}
+
+void httpHandlePcReset() {
+  if (!serverIsAuthorized()) {
+    httpHandleNotFound();
+    return;
+  }
+
+  server.send_P(501, "text/plain", PcNotImplemented, sizeof(PcNotImplemented) - 1);
+}
+
 #ifdef PRIVATE_ALLOW_CROSS
 void serverSendHeadersForRaw() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -310,6 +334,12 @@ void httpHandleRoot() {
 }
 
 void setup() {
+  static char const HostName[] = PRIVATE_HOSTNAME;
+  static char const WiFiSSID[] = PRIVATE_WIFI_SSID;
+  static char const WiFiPassword[] = PRIVATE_WIFI_PASSWORD;
+  static unsigned long const OneSecondAsMs = 1'000;
+  static unsigned long const BaudRate = 115200;
+
   int8_t countNetworks, i, bestScanID;
   int8_t const maxWaits = 20; /* half second each, so 10 seconds in total */
   uint8_t *currentBSSID;
@@ -395,6 +425,8 @@ void setup() {
 
   server.on("/", HTTP_GET, httpHandleRoot);
   server.on("/last", HTTP_GET, httpHandleLast);
+  server.on("/pc/power", HTTP_POST, httpHandlePcPower);
+  server.on("/pc/reset", HTTP_POST, httpHandlePcReset);
   server.on("/raw/last", HTTP_GET, httpHandleRawLast);
   server.on("/raw/all", HTTP_GET, httpHandleRawAll);
   server.onNotFound(httpHandleNotFound);

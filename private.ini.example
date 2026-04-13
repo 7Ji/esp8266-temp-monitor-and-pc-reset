@@ -1,6 +1,9 @@
 [common]
 build_flags =
-    -DPRIVATE_HOSTNAME="hostname, e.g. esp8266"
-    -DPRIVATE_WIFI_SSID="Your WiFi AP Name"
-    -DPRIVATE_WIFI_PASSWORD="Your WiFi Password"
+    -DPRIVATE_HOSTNAME=\"hostname, e.g. esp8266\"
+    -DPRIVATE_WIFI_SSID=\"Your WiFi AP Name\"
+    -DPRIVATE_WIFI_PASSWORD=\"Your WiFi Password\"
+    -DPRIVATE_PC_AUTH=\"REPLACEME\"
     -DPRIVATE_PIN_DHT11=D4
+    -DPRIVATE_PIN_POWER=WHICH_PIN
+    -DPRIVATE_PIN_RESET=WHICH_PIN
