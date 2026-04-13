@@ -3,14 +3,9 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
 
-#include "root.html.h"
+static_assert(sizeof(unsigned long) == sizeof(uint32_t), "unsigned long (would return by millis) is not 32 bit");
 
-#ifdef PRIVATE_PIN_DHT11
-DHT dht(PRIVATE_PIN_DHT11, DHT11);
-#else
-DHT dht(D4, DHT11);
-#endif
-ESP8266WebServer server(80);
+#include "root.html.h"
 
 static char const ErrorStringWouldTruncate[] PROGMEM = "String Would Truncate";
 static char const ErrorStringFormatFailure[] PROGMEM = "String Format Failure";
@@ -32,9 +27,14 @@ D2
 #endif
 ;
 
-#define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
+#ifdef PRIVATE_PIN_DHT11
+DHT dht(PRIVATE_PIN_DHT11, DHT11);
+#else
+DHT dht(D4, DHT11);
+#endif
+ESP8266WebServer server(80);
 
-static_assert(sizeof(unsigned long) == sizeof(uint32_t), "unsigned long (would return by millis) is not 32 bit");
+#define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 
 struct SensorRecord {
   static int const lenBuffer = 32;
@@ -47,7 +47,7 @@ struct SensorRecord {
   uint8_t humidDot;
 
   bool intoStr(BufferT buffer, size_t &len) {
-    int const r = snprintf(buffer, lenBuffer, "%" PRIu32 ",%" PRIu8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", timestamp, tempInt, tempDot, humidInt, humidDot);
+    int const r = snprintf(buffer, lenBuffer, "%" PRIu32 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", timestamp, tempInt, tempDot, humidInt, humidDot);
 
     if (r < 0) {
       serverSendError(StringFormatFailure);
@@ -62,7 +62,7 @@ struct SensorRecord {
   }
 
   bool intoStr(BufferT buffer) {
-    int const r = snprintf(buffer, lenBuffer, "%" PRIu32 ",%" PRIu8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", timestamp, tempInt, tempDot, humidInt, humidDot);
+    int const r = snprintf(buffer, lenBuffer, "%" PRIu32 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", timestamp, tempInt, tempDot, humidInt, humidDot);
 
     return r > 0 && r < lenBuffer;
   }
