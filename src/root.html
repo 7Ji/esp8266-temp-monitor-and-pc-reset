@@ -406,8 +406,8 @@
       const ctx = prepareCanvasContext(canvas);
       const width = canvas.clientWidth || canvas.width;
       const height = canvas.clientHeight || canvas.height;
-      const marginLeft = 40;
-      const marginRight = 20;
+      const marginLeft = 52;
+      const marginRight = 52;
       const marginTop = 20;
       const marginBottom = 34;
       const state = graphStates[config.key];
@@ -423,28 +423,42 @@
         return;
       }
 
-      let minValue = Infinity;
-      let maxValue = -Infinity;
+      let minTemperature = Infinity;
+      let maxTemperature = -Infinity;
+      let minHumidity = Infinity;
+      let maxHumidity = -Infinity;
       entries.forEach((entry) => {
-        minValue = Math.min(minValue, entry.temperature, entry.humidity);
-        maxValue = Math.max(maxValue, entry.temperature, entry.humidity);
+        minTemperature = Math.min(minTemperature, entry.temperature);
+        maxTemperature = Math.max(maxTemperature, entry.temperature);
+        minHumidity = Math.min(minHumidity, entry.humidity);
+        maxHumidity = Math.max(maxHumidity, entry.humidity);
       });
-      if (minValue === maxValue) {
-        minValue -= 1;
-        maxValue += 1;
+
+      if (minTemperature === maxTemperature) {
+        minTemperature -= 1;
+        maxTemperature += 1;
+      }
+      if (minHumidity === maxHumidity) {
+        minHumidity -= 1;
+        maxHumidity += 1;
       }
 
       const firstTime = getEntryAxisMs(entries[0]);
       const lastTime = getEntryAxisMs(entries[entries.length - 1]);
       const timeSpan = Math.max(1, lastTime - firstTime);
-      const valueSpan = maxValue - minValue;
+      const temperatureSpan = maxTemperature - minTemperature;
+      const humiditySpan = maxHumidity - minHumidity;
 
       function xFor(entry) {
         return marginLeft + (getEntryAxisMs(entry) - firstTime) * (width - marginLeft - marginRight) / timeSpan;
       }
 
-      function yFor(value) {
-        return height - marginBottom - (value - minValue) * (height - marginTop - marginBottom) / valueSpan;
+      function yForTemperature(value) {
+        return height - marginBottom - (value - minTemperature) * (height - marginTop - marginBottom) / temperatureSpan;
+      }
+
+      function yForHumidity(value) {
+        return height - marginBottom - (value - minHumidity) * (height - marginTop - marginBottom) / humiditySpan;
       }
 
       ctx.strokeStyle = '#bbb';
@@ -452,14 +466,22 @@
       ctx.moveTo(marginLeft, marginTop);
       ctx.lineTo(marginLeft, height - marginBottom);
       ctx.lineTo(width - marginRight, height - marginBottom);
+      ctx.moveTo(width - marginRight, marginTop);
+      ctx.lineTo(width - marginRight, height - marginBottom);
       ctx.stroke();
 
-      ctx.fillStyle = '#444';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
       ctx.font = '12px monospace';
-      ctx.fillText(minValue.toFixed(1), 4, height - marginBottom + 12);
-      ctx.fillText(maxValue.toFixed(1), 4, marginTop + 4);
+      ctx.fillStyle = '#c62828';
+      ctx.fillText(minTemperature.toFixed(1), 4, height - marginBottom + 12);
+      ctx.fillText(maxTemperature.toFixed(1), 4, marginTop + 4);
+      ctx.fillStyle = '#1565c0';
+      ctx.textAlign = 'right';
+      ctx.fillText(minHumidity.toFixed(1), width - 4, height - marginBottom + 12);
+      ctx.fillText(maxHumidity.toFixed(1), width - 4, marginTop + 4);
+      ctx.fillStyle = '#444';
+      ctx.textAlign = 'left';
       ctx.fillText(formatGraphTimestamp(entries[0]), marginLeft, height - 8);
       ctx.textAlign = 'right';
       ctx.fillText(formatGraphTimestamp(entries[entries.length - 1]), width - marginRight, height - 8);
@@ -468,7 +490,7 @@
       ctx.beginPath();
       entries.forEach((entry, index) => {
         const x = xFor(entry);
-        const y = yFor(entry.temperature);
+        const y = yForTemperature(entry.temperature);
         if (index === 0) {
           ctx.moveTo(x, y);
         } else {
@@ -481,7 +503,7 @@
       ctx.beginPath();
       entries.forEach((entry, index) => {
         const x = xFor(entry);
-        const y = yFor(entry.humidity);
+        const y = yForHumidity(entry.humidity);
         if (index === 0) {
           ctx.moveTo(x, y);
         } else {
@@ -493,8 +515,8 @@
       if (state.hoverIndex >= 0 && state.hoverIndex < entries.length) {
         const hoveredEntry = entries[state.hoverIndex];
         const hoverX = xFor(hoveredEntry);
-        const hoverTempY = yFor(hoveredEntry.temperature);
-        const hoverHumidY = yFor(hoveredEntry.humidity);
+        const hoverTempY = yForTemperature(hoveredEntry.temperature);
+        const hoverHumidY = yForHumidity(hoveredEntry.humidity);
         const tooltipLines = [
           formatGraphTimestamp(hoveredEntry),
           'T ' + hoveredEntry.temperature.toFixed(2) + ' C',
@@ -559,8 +581,8 @@
       const mouseY = (event.clientY - rect.top) * canvas.height / rect.height;
       const entries = entriesForWindow(config.windowSeconds);
       const state = graphStates[config.key];
-      const marginLeft = 40;
-      const marginRight = 20;
+      const marginLeft = 52;
+      const marginRight = 52;
       const marginTop = 20;
       const marginBottom = 34;
 
@@ -632,7 +654,7 @@
       document.getElementById('humidity').textContent = currentEntry.humidity.toFixed(1);
       document.getElementById('uptime').textContent = formatUptime(currentEntry.timestamp);
       document.getElementById('samples').textContent = String(historyEntries.length);
-      document.getElementById('graph-status').textContent = 'Red = temperature (C), blue = humidity (%); graphs use anchored wall-clock time.';
+      document.getElementById('graph-status').textContent = 'Red = temperature (C) uses the left axis, blue = humidity (%) uses the right axis; graphs use anchored wall-clock time.';
       drawAllGraphs();
     }
 
