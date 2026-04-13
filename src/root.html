@@ -140,8 +140,6 @@
       }
     ];
     const graphStates = {};
-    const duplicateLiveSampleWindowMs = 15000;
-
     let historyEntries = [];
 
     graphConfigs.forEach((config) => {
@@ -246,19 +244,7 @@
     }
 
     function getEntryAxisMs(entry) {
-      if (!entry) {
-        return NaN;
-      }
-
-      if (Number.isFinite(entry.wallClockMs)) {
-        return entry.wallClockMs;
-      }
-
-      if (Number.isFinite(entry.timestamp)) {
-        return entry.timestamp * 1000;
-      }
-
-      return NaN;
+      return entry && Number.isFinite(entry.wallClockMs) ? entry.wallClockMs : NaN;
     }
 
     function formatDurationParts(totalSeconds) {
@@ -309,15 +295,7 @@
     }
 
     function formatGraphTimestamp(entry) {
-      if (!entry || !Number.isFinite(entry.timestamp)) {
-        return '--';
-      }
-
-      if (Number.isFinite(entry.wallClockMs)) {
-        return formatWallClockMs(entry.wallClockMs);
-      }
-
-      return 'ts ' + entry.timestamp.toFixed(0) + ' s';
+      return entry && Number.isFinite(entry.wallClockMs) ? formatWallClockMs(entry.wallClockMs) : '--';
     }
 
     function stampHistoryFromEntry(anchorEntry) {
@@ -341,41 +319,17 @@
       }
 
       if (lastEntry.timestamp === entry.timestamp) {
-        if (!Number.isFinite(lastEntry.wallClockMs)) {
-          historyEntries[historyEntries.length - 1] = entry;
-          return entry;
-        }
-
-        if (entry.wallClockMs - lastEntry.wallClockMs <= duplicateLiveSampleWindowMs) {
-          const mergedEntry = {
-            timestamp: entry.timestamp,
-            temperature: entry.temperature,
-            humidity: entry.humidity,
-            wallClockMs: lastEntry.wallClockMs,
-          };
-          historyEntries[historyEntries.length - 1] = mergedEntry;
-          return mergedEntry;
-        }
+        const mergedEntry = {
+          timestamp: entry.timestamp,
+          temperature: entry.temperature,
+          humidity: entry.humidity,
+          wallClockMs: Number.isFinite(lastEntry.wallClockMs) ? lastEntry.wallClockMs : entry.wallClockMs,
+        };
+        historyEntries[historyEntries.length - 1] = mergedEntry;
+        return mergedEntry;
       }
 
-      if (entry.wallClockMs >= getEntryAxisMs(lastEntry)) {
-        historyEntries.push(entry);
-        return entry;
-      }
-
-      let left = 0;
-      let right = historyEntries.length;
-
-      while (left < right) {
-        const middle = (left + right) >> 1;
-        if (getEntryAxisMs(historyEntries[middle]) <= entry.wallClockMs) {
-          left = middle + 1;
-        } else {
-          right = middle;
-        }
-      }
-
-      historyEntries.splice(left, 0, entry);
+      historyEntries.push(entry);
       return entry;
     }
 
