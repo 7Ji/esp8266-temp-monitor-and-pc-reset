@@ -79,6 +79,7 @@
       <p>
         <span class="value">Temp: <strong id="temperature">--</strong> C</span>
         <span class="value">Humidity: <strong id="humidity">--</strong> %</span>
+        <span class="value">Uptime: <strong id="uptime">--</strong></span>
         <span class="value">Samples: <strong id="samples">--</strong></span>
       </p>
       <p class="hint">Data routes: <code>/raw/last</code>, <code>/raw/all</code>, <code>/last</code></p>
@@ -139,10 +140,9 @@
       }
     ];
     const graphStates = {};
+    const duplicateLiveSampleWindowMs = 15000;
 
     let historyEntries = [];
-    let latestCurrentTimestamp = NaN;
-    let latestCurrentWallClockMs = NaN;
 
     graphConfigs.forEach((config) => {
       graphStates[config.key] = {
@@ -230,6 +230,7 @@
           timestamp: Number(parts[0]),
           temperature: Number(parts[1]),
           humidity: Number(parts[2]),
+          wallClockMs: NaN,
         };
       }).filter((entry) =>
         Number.isFinite(entry.timestamp) &&
@@ -240,66 +241,142 @@
       return normalizeEntries(entries);
     }
 
-    function upsertEntry(entry) {
+    function clamp(value, minValue, maxValue) {
+      return Math.max(minValue, Math.min(maxValue, value));
+    }
+
+    function getEntryAxisMs(entry) {
+      if (!entry) {
+        return NaN;
+      }
+
+      if (Number.isFinite(entry.wallClockMs)) {
+        return entry.wallClockMs;
+      }
+
+      if (Number.isFinite(entry.timestamp)) {
+        return entry.timestamp * 1000;
+      }
+
+      return NaN;
+    }
+
+    function formatDurationParts(totalSeconds) {
+      const safeSeconds = Math.max(0, Math.floor(totalSeconds));
+      const days = Math.floor(safeSeconds / 86400);
+      const hours = Math.floor((safeSeconds % 86400) / 3600);
+      const minutes = Math.floor((safeSeconds % 3600) / 60);
+      const seconds = safeSeconds % 60;
+      const parts = [];
+
+      if (days > 0) {
+        parts.push(days + 'd');
+      }
+      if (days > 0 || hours > 0) {
+        parts.push(hours + 'h');
+      }
+      if (days > 0 || hours > 0 || minutes > 0) {
+        parts.push(minutes + 'm');
+      }
+      parts.push(seconds + 's');
+
+      return parts;
+    }
+
+    function formatUptime(timestamp) {
+      if (!Number.isFinite(timestamp)) {
+        return '--';
+      }
+
+      return formatDurationParts(timestamp).join(' ');
+    }
+
+    function formatWallClockMs(wallClockMs) {
+      const date = new Date(wallClockMs);
+      return (
+        String(date.getFullYear()) +
+        '-' +
+        String(date.getMonth() + 1).padStart(2, '0') +
+        '-' +
+        String(date.getDate()).padStart(2, '0') +
+        ' ' +
+        String(date.getHours()).padStart(2, '0') +
+        ':' +
+        String(date.getMinutes()).padStart(2, '0') +
+        ':' +
+        String(date.getSeconds()).padStart(2, '0')
+      );
+    }
+
+    function formatGraphTimestamp(entry) {
+      if (!entry || !Number.isFinite(entry.timestamp)) {
+        return '--';
+      }
+
+      if (Number.isFinite(entry.wallClockMs)) {
+        return formatWallClockMs(entry.wallClockMs);
+      }
+
+      return 'ts ' + entry.timestamp.toFixed(0) + ' s';
+    }
+
+    function stampHistoryFromEntry(anchorEntry) {
+      if (!anchorEntry || !Number.isFinite(anchorEntry.timestamp) || !Number.isFinite(anchorEntry.wallClockMs)) {
+        return;
+      }
+
+      historyEntries.forEach((entry) => {
+        if (!Number.isFinite(entry.wallClockMs)) {
+          entry.wallClockMs = anchorEntry.wallClockMs - (anchorEntry.timestamp - entry.timestamp) * 1000;
+        }
+      });
+    }
+
+    function appendLiveEntry(entry) {
+      const lastEntry = historyEntries[historyEntries.length - 1];
+
+      if (!lastEntry) {
+        historyEntries.push(entry);
+        return entry;
+      }
+
+      if (lastEntry.timestamp === entry.timestamp) {
+        if (!Number.isFinite(lastEntry.wallClockMs)) {
+          historyEntries[historyEntries.length - 1] = entry;
+          return entry;
+        }
+
+        if (entry.wallClockMs - lastEntry.wallClockMs <= duplicateLiveSampleWindowMs) {
+          const mergedEntry = {
+            timestamp: entry.timestamp,
+            temperature: entry.temperature,
+            humidity: entry.humidity,
+            wallClockMs: lastEntry.wallClockMs,
+          };
+          historyEntries[historyEntries.length - 1] = mergedEntry;
+          return mergedEntry;
+        }
+      }
+
+      if (entry.wallClockMs >= getEntryAxisMs(lastEntry)) {
+        historyEntries.push(entry);
+        return entry;
+      }
+
       let left = 0;
       let right = historyEntries.length;
 
       while (left < right) {
         const middle = (left + right) >> 1;
-        if (historyEntries[middle].timestamp < entry.timestamp) {
+        if (getEntryAxisMs(historyEntries[middle]) <= entry.wallClockMs) {
           left = middle + 1;
         } else {
           right = middle;
         }
       }
 
-      if (left < historyEntries.length && historyEntries[left].timestamp === entry.timestamp) {
-        historyEntries[left] = entry;
-      } else {
-        historyEntries.splice(left, 0, entry);
-      }
-    }
-
-    function pad2(value) {
-      return String(value).padStart(2, '0');
-    }
-
-    function clamp(value, minValue, maxValue) {
-      return Math.max(minValue, Math.min(maxValue, value));
-    }
-
-    function formatWallClock(timestamp) {
-      if (!Number.isFinite(latestCurrentTimestamp) || !Number.isFinite(latestCurrentWallClockMs)) {
-        return 'uptime ' + timestamp.toFixed(0) + ' s';
-      }
-
-      const inferredMs = latestCurrentWallClockMs - (latestCurrentTimestamp - timestamp) * 1000;
-      const date = new Date(inferredMs);
-      return (
-        String(date.getFullYear()) +
-        '-' +
-        pad2(date.getMonth() + 1) +
-        '-' +
-        pad2(date.getDate()) +
-        ' ' +
-        pad2(date.getHours()) +
-        ':' +
-        pad2(date.getMinutes()) +
-        ':' +
-        pad2(date.getSeconds())
-      );
-    }
-
-    function getAnchorTimestamp() {
-      if (Number.isFinite(latestCurrentTimestamp)) {
-        return latestCurrentTimestamp;
-      }
-
-      if (historyEntries.length === 0) {
-        return NaN;
-      }
-
-      return historyEntries[historyEntries.length - 1].timestamp;
+      historyEntries.splice(left, 0, entry);
+      return entry;
     }
 
     function entriesForWindow(windowSeconds) {
@@ -307,13 +384,13 @@
         return historyEntries.slice();
       }
 
-      const anchorTimestamp = getAnchorTimestamp();
-      if (!Number.isFinite(anchorTimestamp)) {
+      const anchorAxisMs = getEntryAxisMs(historyEntries[historyEntries.length - 1]);
+      if (!Number.isFinite(anchorAxisMs)) {
         return [];
       }
 
-      const earliestTimestamp = anchorTimestamp - windowSeconds;
-      return historyEntries.filter((entry) => entry.timestamp >= earliestTimestamp);
+      const earliestAxisMs = anchorAxisMs - windowSeconds * 1000;
+      return historyEntries.filter((entry) => getEntryAxisMs(entry) >= earliestAxisMs);
     }
 
     function formatSummary(entries) {
@@ -403,13 +480,13 @@
         maxValue += 1;
       }
 
-      const firstTime = entries[0].timestamp;
-      const lastTime = entries[entries.length - 1].timestamp;
+      const firstTime = getEntryAxisMs(entries[0]);
+      const lastTime = getEntryAxisMs(entries[entries.length - 1]);
       const timeSpan = Math.max(1, lastTime - firstTime);
       const valueSpan = maxValue - minValue;
 
       function xFor(entry) {
-        return marginLeft + (entry.timestamp - firstTime) * (width - marginLeft - marginRight) / timeSpan;
+        return marginLeft + (getEntryAxisMs(entry) - firstTime) * (width - marginLeft - marginRight) / timeSpan;
       }
 
       function yFor(value) {
@@ -429,9 +506,9 @@
       ctx.font = '12px monospace';
       ctx.fillText(minValue.toFixed(1), 4, height - marginBottom + 12);
       ctx.fillText(maxValue.toFixed(1), 4, marginTop + 4);
-      ctx.fillText(formatWallClock(firstTime), marginLeft, height - 8);
+      ctx.fillText(formatGraphTimestamp(entries[0]), marginLeft, height - 8);
       ctx.textAlign = 'right';
-      ctx.fillText(formatWallClock(lastTime), width - marginRight, height - 8);
+      ctx.fillText(formatGraphTimestamp(entries[entries.length - 1]), width - marginRight, height - 8);
 
       ctx.strokeStyle = '#c62828';
       ctx.beginPath();
@@ -465,7 +542,7 @@
         const hoverTempY = yFor(hoveredEntry.temperature);
         const hoverHumidY = yFor(hoveredEntry.humidity);
         const tooltipLines = [
-          formatWallClock(hoveredEntry.timestamp),
+          formatGraphTimestamp(hoveredEntry),
           'T ' + hoveredEntry.temperature.toFixed(2) + ' C',
           'H ' + hoveredEntry.humidity.toFixed(2) + ' %'
         ];
@@ -548,14 +625,14 @@
         return;
       }
 
-      const firstTime = entries[0].timestamp;
-      const lastTime = entries[entries.length - 1].timestamp;
+      const firstTime = getEntryAxisMs(entries[0]);
+      const lastTime = getEntryAxisMs(entries[entries.length - 1]);
       const timeSpan = Math.max(1, lastTime - firstTime);
       let bestIndex = 0;
       let bestDistance = Infinity;
 
       entries.forEach((entry, index) => {
-        const x = marginLeft + (entry.timestamp - firstTime) * (canvas.width - marginLeft - marginRight) / timeSpan;
+        const x = marginLeft + (getEntryAxisMs(entry) - firstTime) * (canvas.width - marginLeft - marginRight) / timeSpan;
         const distance = Math.abs(x - mouseX);
         if (distance < bestDistance) {
           bestDistance = distance;
@@ -588,16 +665,20 @@
         throw new Error('No current data');
       }
 
-      const entry = entries[0];
-      latestCurrentTimestamp = entry.timestamp;
-      latestCurrentWallClockMs = Date.now();
+      const entry = {
+        timestamp: entries[0].timestamp,
+        temperature: entries[0].temperature,
+        humidity: entries[0].humidity,
+        wallClockMs: Date.now(),
+      };
+      const currentEntry = appendLiveEntry(entry);
+      stampHistoryFromEntry(currentEntry);
 
-      upsertEntry(entry);
-
-      document.getElementById('temperature').textContent = entry.temperature.toFixed(1);
-      document.getElementById('humidity').textContent = entry.humidity.toFixed(1);
+      document.getElementById('temperature').textContent = currentEntry.temperature.toFixed(1);
+      document.getElementById('humidity').textContent = currentEntry.humidity.toFixed(1);
+      document.getElementById('uptime').textContent = formatUptime(currentEntry.timestamp);
       document.getElementById('samples').textContent = String(historyEntries.length);
-      document.getElementById('graph-status').textContent = 'Red = temperature (C), blue = humidity (%); each graph uses raw sample timestamps on the x-axis.';
+      document.getElementById('graph-status').textContent = 'Red = temperature (C), blue = humidity (%); graphs use anchored wall-clock time.';
       drawAllGraphs();
     }
 
@@ -607,7 +688,8 @@
         const entry = historyEntries[historyEntries.length - 1];
         document.getElementById('temperature').textContent = entry.temperature.toFixed(1);
         document.getElementById('humidity').textContent = entry.humidity.toFixed(1);
-        document.getElementById('graph-status').textContent = 'History loaded; waiting for latest sample to anchor wall-clock time.';
+        document.getElementById('uptime').textContent = formatUptime(entry.timestamp);
+        document.getElementById('graph-status').textContent = 'History loaded; waiting for latest /raw/last sample.';
       }
       document.getElementById('samples').textContent = String(historyEntries.length);
       drawAllGraphs();
