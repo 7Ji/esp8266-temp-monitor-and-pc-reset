@@ -213,7 +213,7 @@ void httpHandleLast() {
     for (i = 0; i < countArgs; ++i) {
       String const &argName = server.argName(i);
       if (argName.startsWith("temp")) {
-        r = snprintf(buffer + offset, remain, ",%" PRIu8 ".%" PRIu8, record.tempInt, record.tempDot);
+        r = snprintf(buffer + offset, remain, ",%" PRId8 ".%" PRIu8, record.tempInt, record.tempDot);
       } else if (argName.startsWith("humid")) {
         r = snprintf(buffer + offset, remain, ",%" PRIu8 ".%" PRIu8, record.humidInt, record.humidDot);
       } else {
@@ -232,7 +232,7 @@ void httpHandleLast() {
     }
     server.send(200, "text/plain", buffer + 1, offset - 1);
   } else {
-    r = snprintf(buffer, lenBuffer, "%" PRIu8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "", record.tempInt, record.tempDot, record.humidInt, record.humidDot);
+    r = snprintf(buffer, lenBuffer, "%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "", record.tempInt, record.tempDot, record.humidInt, record.humidDot);
     if (r < 0) {
       serverSendError(StringFormatFailure);
       return;
