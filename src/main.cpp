@@ -15,6 +15,22 @@ ESP8266WebServer server(80);
 static char const ErrorStringWouldTruncate[] PROGMEM = "String Would Truncate";
 static char const ErrorStringFormatFailure[] PROGMEM = "String Format Failure";
 static char const ErrorNotFound[] PROGMEM = "Not Found";
+static char const PcPowerOk[] PROGMEM = "Power button pulse sent";
+static char const PcResetOk[] PROGMEM = "Reset button pulse sent";
+static uint8_t const PcPinPower =
+#ifdef PRIVATE_PIN_POWER
+PRIVATE_PIN_POWER
+#else
+D1
+#endif
+;
+static uint8_t const PcPinReset =
+#ifdef PRIVATE_PIN_RESET
+PRIVATE_PIN_RESET
+#else
+D2
+#endif
+;
 
 #define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 
@@ -243,7 +259,11 @@ bool serverIsAuthorized() {
   return server.header(HeaderAuthorization) == AuthExpected;
 }
 
-static char const PcNotImplemented[] PROGMEM = "PC routes not implemented yet";
+void pulseButton(uint8_t const pin) {
+  digitalWrite(pin, HIGH);
+  delay(250);
+  digitalWrite(pin, LOW);
+}
 
 void httpHandlePcPower() {
   if (!serverIsAuthorized()) {
@@ -251,7 +271,8 @@ void httpHandlePcPower() {
     return;
   }
 
-  server.send_P(501, "text/plain", PcNotImplemented, sizeof(PcNotImplemented) - 1);
+  pulseButton(PcPinPower);
+  server.send_P(200, "text/plain", PcPowerOk, sizeof(PcPowerOk) - 1);
 }
 
 void httpHandlePcReset() {
@@ -260,7 +281,8 @@ void httpHandlePcReset() {
     return;
   }
 
-  server.send_P(501, "text/plain", PcNotImplemented, sizeof(PcNotImplemented) - 1);
+  pulseButton(PcPinReset);
+  server.send_P(200, "text/plain", PcResetOk, sizeof(PcResetOk) - 1);
 }
 
 #ifdef PRIVATE_ALLOW_CROSS
@@ -346,6 +368,11 @@ void setup() {
   int32_t bestRSSI, currentRSSI, currentChannel;
   String const wantedSSID = String(WiFiSSID);
   String currentSSID;
+
+  pinMode(PcPinPower, OUTPUT);
+  digitalWrite(PcPinPower, LOW);
+  pinMode(PcPinReset, OUTPUT);
+  digitalWrite(PcPinReset, LOW);
 
   Serial.begin(BaudRate);
   dht.begin();
