@@ -25,12 +25,14 @@ char const ErrorNotFound[] PROGMEM = "Not Found";
 
 #define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 
+static_assert(sizeof(unsigned long) == sizeof(uint32_t), "unsigned long (would return by millis) is not 32 bit");
+
 struct SensorRecord {
   static int const lenBuffer = 32;
   typedef char (&BufferT)[lenBuffer];
 
-  uint32_t timestamp;
-  uint8_t tempInt;
+  uint32_t timestamp; /* second */
+  int8_t tempInt;
   uint8_t tempDot;
   uint8_t humidInt;
   uint8_t humidDot;
@@ -73,7 +75,10 @@ struct SensorHistory {
   SensorRecord entriesL2[MaxHistoryL2];
   SensorRecord entriesL1[MaxHistoryL1];
   SensorRecord entriesL0[MaxHistoryL0];
-  uint32_t timeLast = 0;
+  uint32_t secondsLast = 0;
+  uint32_t millisLast = 0;
+  uint32_t secondsOffset = 0;
+  uint32_t millisOffset = 0;
   uint16_t headL2 = 0;
   uint16_t countL2 = 0;
   uint8_t headL1 = 0;
@@ -118,7 +123,7 @@ struct SensorHistory {
     return atL0(index - countL1);
   }
 
-  void fetchAppend(unsigned long const timestamp) {
+  void fetchAppend(uint32_t const secondsCurrent, uint32_t const millisCurrent) {
     struct SensorRecord * record;
     uint16_t current;
 
@@ -151,20 +156,35 @@ struct SensorHistory {
 
     record = entriesL0 + current;
 
-    record->timestamp = timeLast = timestamp;
+    millisLast = millisCurrent;
+    record->timestamp = secondsLast = secondsCurrent;
     record->humidInt = dht.data[0];
     record->humidDot = dht.data[1];
-    record->tempInt = dht.data[2];
+    record->tempInt =  static_cast<int8_t>(dht.data[2]);
     record->tempDot = dht.data[3];
   }
 
-  void maybeFetchAppend() {
-    unsigned long timeCurrent = millis();
+  void firstFetchAppend() {
+    uint32_t const millisCurrent = millis();
+    fetchAppend(millisCurrent / 1000, millisCurrent);
+  }
 
-    if (timeCurrent - timeLast <= 2000) {
-      return;
+  void maybeFetchAppend() {
+    uint32_t const millisCurrent = millis();
+    uint32_t const millisElasped = millisCurrent - millisLast;
+
+    if (millisElasped >= 2000) {
+      if (millisCurrent < millisLast) { /* overflow */
+        /* UINT32_MAX = 0xFFFFFFFF = 4294967295 */
+        secondsOffset += 4294967;
+        millisOffset += 295;
+        while (millisOffset >= 1000) {
+          millisOffset -= 1000;
+          secondsOffset += 1;
+        }
+      }
+      fetchAppend(secondsOffset + (millisCurrent + millisOffset) / 1000, millisCurrent);
     }
-    fetchAppend(timeCurrent);
   }
 };
 
@@ -380,7 +400,7 @@ void setup() {
   server.onNotFound(httpHandleNotFound);
   server.begin();
 
-  history.fetchAppend(millis());
+  history.firstFetchAppend();
 
   Serial.println("HTTP Server started");
 }
