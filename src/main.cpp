@@ -2,6 +2,7 @@
 #include <DHT.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
 
 static_assert(sizeof(unsigned long) == sizeof(uint32_t), "unsigned long (would return by millis) is not 32 bit");
 
@@ -12,6 +13,8 @@ static char const ErrorStringFormatFailure[] PROGMEM = "String Format Failure";
 static char const ErrorNotFound[] PROGMEM = "Not Found";
 static char const PcPowerOk[] PROGMEM = "Power button pulse sent";
 static char const PcResetOk[] PROGMEM = "Reset button pulse sent";
+
+static uint8_t const MaxWaits = 20;
 static uint8_t const PcPinPower =
 #ifdef PRIVATE_PIN_POWER
 PRIVATE_PIN_POWER
@@ -26,18 +29,91 @@ PRIVATE_PIN_RESET
 D2
 #endif
 ;
-
+static DHT dht(
 #ifdef PRIVATE_PIN_DHT11
-DHT dht(PRIVATE_PIN_DHT11, DHT11);
+PRIVATE_PIN_DHT11
 #else
-DHT dht(D4, DHT11);
+D4
 #endif
-ESP8266WebServer server(80);
+, DHT11);
+static ESP8266WebServer server(80);
 
 #define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 
+static uint32_t const NtpUnixOffset = 2208988800UL;
+static uint32_t const MinUnixOffset = 1776133834UL; /* Tue Apr 14 11:00:01 CST 2026, no specific reason */
+static uint32_t const MinNtp = NtpUnixOffset + MinUnixOffset;
+static uint64_t unixOffset = MinUnixOffset;
+
+void getNtpOffset() {
+  static char const NtpServer[] =
+#ifdef PRIVATE_NTP_SERVER
+    PRIVATE_NTP_SERVER
+#else
+    "pool.ntp.org"
+#endif
+      ;
+  static uint16_t const UdpPortNtp =
+#ifdef PRIVATE_NTP_LOCAL_PORT
+    PRIVATE_NTP_LOCAL_PORT
+#else
+    7931 /* This is chosen simply randomly */
+#endif
+      ;
+
+  uint8_t i;
+  uint32_t ntpOffset;
+  byte buffer[48] = {0b11100011, 0};
+  IPAddress serverIP;
+  WiFiUDP udp;
+
+  /* This is the logic that would try from raw IP string first, so no extra call to it */
+  if (!WiFi.hostByName(NtpServer, serverIP)) {
+    Serial.printf("Failed to resolve '%s' to IP\n", NtpServer);
+    return;
+  }
+  if (!udp.begin(UdpPortNtp)) {
+    Serial.printf("Failed to listen on %" PRIu16 "\n", UdpPortNtp);
+    return;
+  }
+  if (!udp.beginPacket(serverIP, 123)) {
+    Serial.println("Failed to begin NTP packet");
+    return;
+  }
+  if (udp.write(buffer, sizeof buffer) != sizeof buffer) {
+    Serial.println("Failed to write whole NTP packet");
+    return;
+  }
+  if (!udp.endPacket()) {
+    Serial.println("Failed to end UDP packet");
+    return;
+  }
+  for (i = 0;;) {
+    if (udp.parsePacket()) {
+      break;
+    }
+    delay(100);
+    if (++i > 20) {
+      Serial.println("Timeout waiting for NTP response");
+      return;
+    }
+  }
+  if (udp.read(buffer, sizeof buffer) != sizeof buffer) {
+    Serial.println("Failed to read NTP response");
+    return;
+  }
+  ntpOffset = ((uint32_t(word(buffer[40], buffer[41])) << 16) | word(buffer[42], buffer[43]));
+  if (ntpOffset < MinNtp) {
+    Serial.printf("NTP offset %" PRIu32 " < minimum NTP %" PRIu32 ", adding one era\n", ntpOffset, MinNtp);
+    unixOffset = 0x100000000ULL + ntpOffset - NtpUnixOffset;
+  } else {
+    unixOffset = ntpOffset - NtpUnixOffset;
+  }
+  Serial.printf("Current unix offset is %" PRIu64 "\n", unixOffset);
+}
+
 struct SensorRecord {
-  static int const lenBuffer = 32;
+  static int const lenBuffer = 38; /* extreme 18446744073709551615,255.255,255.255\n */
   typedef char (&BufferT)[lenBuffer];
 
   uint32_t timestamp; /* second */
@@ -47,7 +123,7 @@ struct SensorRecord {
   uint8_t humidDot;
 
   bool intoStr(BufferT buffer, size_t &len) {
-    int const r = snprintf(buffer, lenBuffer, "%" PRIu32 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", timestamp, tempInt, tempDot, humidInt, humidDot);
+    int const r = snprintf(buffer, lenBuffer, "%" PRIu64 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", unixOffset + timestamp, tempInt, tempDot, humidInt, humidDot);
 
     if (r < 0) {
       serverSendError(StringFormatFailure);
@@ -62,7 +138,7 @@ struct SensorRecord {
   }
 
   bool intoStr(BufferT buffer) {
-    int const r = snprintf(buffer, lenBuffer, "%" PRIu32 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", timestamp, tempInt, tempDot, humidInt, humidDot);
+    int const r = snprintf(buffer, lenBuffer, "%" PRIu64 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", unixOffset + timestamp, tempInt, tempDot, humidInt, humidDot);
 
     return r > 0 && r < lenBuffer;
   }
@@ -171,6 +247,7 @@ struct SensorHistory {
 
   void firstFetchAppend() {
     uint32_t const millisCurrent = millis();
+    dht.begin();
     fetchAppend(millisCurrent / 1000, millisCurrent);
   }
 
@@ -358,9 +435,8 @@ void setup() {
   static unsigned long const OneSecondAsMs = 1'000;
   static unsigned long const BaudRate = 115200;
 
-  int8_t countNetworks, i, bestScanID;
-  int8_t const maxWaits = 20; /* half second each, so 10 seconds in total */
-  uint8_t *currentBSSID;
+  int8_t countNetworks, bestScanID;
+  uint8_t i, *currentBSSID;
   int32_t bestRSSI, currentRSSI, currentChannel;
   String const wantedSSID = String(WiFiSSID);
   String currentSSID;
@@ -371,7 +447,7 @@ void setup() {
   digitalWrite(PcPinReset, LOW);
 
   Serial.begin(BaudRate);
-  dht.begin();
+  history.firstFetchAppend();
   WiFi.setHostname(HostName);
   WiFi.setAutoReconnect(true);
 
@@ -427,13 +503,13 @@ void setup() {
     WiFi.begin(WiFiSSID, WiFiPassword, WiFi.channel(bestScanID), WiFi.BSSID(bestScanID));
     WiFi.scanDelete();
 
-    for (i = 0; i < maxWaits; ++i) {
+    for (i = 0; i < MaxWaits; ++i) {
       if (WiFi.status() == WL_CONNECTED) {
         break;
       }
       delay(500);
     }
-    if (i < maxWaits) {
+    if (i < MaxWaits) {
       Serial.print("WiFi IP: ");
       Serial.print(WiFi.localIP());
       Serial.print(" / ");
@@ -446,6 +522,8 @@ void setup() {
     delay(OneSecondAsMs);
   }
 
+  getNtpOffset();
+
   server.on("/", HTTP_GET, httpHandleRoot);
   server.on("/last", HTTP_GET, httpHandleLast);
   server.on("/pc/power", HTTP_POST, httpHandlePcPower);
@@ -454,8 +532,6 @@ void setup() {
   server.on("/raw/all", HTTP_GET, httpHandleRawAll);
   server.onNotFound(httpHandleNotFound);
   server.begin();
-
-  history.firstFetchAppend();
 
   Serial.println("HTTP Server started");
 }
