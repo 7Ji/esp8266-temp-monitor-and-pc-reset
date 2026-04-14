@@ -207,10 +207,8 @@ struct SensorSlice {
 
 struct SensorHistory {
   static uint8_t const MaxHistoryL0 = 1 << 5; /* 2s * 32, even secondly, for about a minute */
-  static uint8_t const MaxHistoryL1 = 1 << 6; /* 64s * 64, minutely, for about an hour */
 
   static uint8_t const RingMaskL0 = MaxHistoryL0 - 1;
-  static uint8_t const RingMaskL1 = MaxHistoryL1 - 1;
 
   static uint32_t const FlashAddrStart = 0x100000;
   static uint32_t const FlashAddrEnd = 0x3FB000;
@@ -220,28 +218,23 @@ struct SensorHistory {
   static uint16_t const FlashSectEnd = FlashAddrEnd / FlashSectSize;
   static uint16_t const FlashSectCount = FlashSectEnd - FlashSectStart;
 
-  SensorSlice sliceL2 = {.magic = SensorSlice::Magic}, sliceL3;
-  SensorRecord recordsL1[MaxHistoryL1];
+  SensorSlice sliceL1 = {.magic = SensorSlice::Magic}, sliceL2; /* about minutely, flush to flash every 510 minutes */
   SensorRecord recordsL0[MaxHistoryL0];
   uint32_t secondsLast = 0;
   uint32_t millisLast = 0;
   uint32_t secondsOffset = 0;
   uint32_t millisOffset = 0;
-  uint16_t countL3 = 0;
-  uint16_t headL3 = 0;
   uint16_t countL2 = 0;
-  uint8_t headL1 = 0;
-  uint8_t countL1 = 0;
+  uint16_t headL2 = 0;
+  uint16_t countL1 = 0;
   uint8_t headL0 = 0;
   uint8_t countL0 = 0;
 
   SensorRecord &first() {
-    if (countL3 > 0 && fetchToL3(headL3)) {
-      return sliceL3.records[0];
-    } else if (countL2 > 0) {
+    if (countL2 > 0 && fetchToL2(headL2)) {
       return sliceL2.records[0];
     } else if (countL1 > 0) {
-      return recordsL1[headL1];
+      return sliceL1.records[0];
     } else {
       return recordsL0[headL0];
     }
@@ -251,60 +244,52 @@ struct SensorHistory {
     return recordsL0[(headL0 + countL0 - 1) & RingMaskL0];
   }
 
-  SensorRecord &atL0(uint8_t const index) {
-    return recordsL0[(headL0 + index) & RingMaskL0];
-  }
-
-  SensorRecord &atL1(uint8_t const index) {
-    return recordsL1[(headL1 + index) & RingMaskL1];
-  }
-
-  void flushL2ToL3() {
+  void flushL1ToL2() {
     SpiFlashOpResult opResult;
-    uint16_t const sectorID = FlashSectStart + (headL3 + countL3) % FlashSectCount;
+    uint16_t const sectorID = FlashSectStart + (headL2 + countL2) % FlashSectCount;
 
-    Serial.printf("Flushing L2 to flash sector %" PRIu16 "\n", sectorID);
-    sliceL2.unixOffset = ntpSyncer.unixOffset;
-    sliceL2.checksum = sliceL2.actualChecksum();
+    Serial.printf("Flushing L1 to L2 flash sector %" PRIu16 "\n", sectorID);
+    sliceL1.unixOffset = ntpSyncer.unixOffset;
+    sliceL1.checksum = sliceL1.actualChecksum();
     for (;;) {
       opResult = spi_flash_erase_sector(sectorID);
       if (opResult != SPI_FLASH_RESULT_OK) {
         Serial.printf("Failed to erase sector %" PRIu16 "\n", sectorID);
         break;
       }
-      opResult = spi_flash_write(FlashAddrStart + sectorID * FlashSectSize, reinterpret_cast<uint32_t *>(&sliceL2), FlashSectSize);
+      opResult = spi_flash_write(sectorID * FlashSectSize, reinterpret_cast<uint32_t *>(&sliceL1), FlashSectSize);
       if (opResult != SPI_FLASH_RESULT_OK) {
         Serial.printf("Failed to write to sector %" PRIu16 "\n", sectorID);
         break;
       }
-      countL2 = 0;
-      if (countL3 == FlashSectCount) {
-        headL3 = (headL3 + 1) % FlashSectCount;
+      countL1 = 0;
+      if (countL2 == FlashSectCount) {
+        headL2 = (headL2 + 1) % FlashSectCount;
       } else {
-        ++countL3;
+        ++countL2;
       }
       return;
     }
     Serial.println("Failed to flush, shifting L2 by one position");
-    sliceL2.shift();
-    countL2 = SensorSlice::MaxRecordsSub1;
+    sliceL1.shift();
+    countL1 = SensorSlice::MaxRecordsSub1;
   }
 
-  bool fetchToL3(uint16_t const sliceID) {
+  bool fetchToL2(uint16_t const sliceID) {
     uint32_t checksum;
-    SpiFlashOpResult const opResult = spi_flash_read(FlashAddrStart + sliceID * sizeof(sliceL3), reinterpret_cast<uint32_t *>(&sliceL3), sizeof(sliceL3));
+    SpiFlashOpResult const opResult = spi_flash_read(FlashAddrStart + sliceID * sizeof(sliceL2), reinterpret_cast<uint32_t *>(&sliceL2), sizeof(sliceL2));
 
     if (opResult != SPI_FLASH_RESULT_OK) {
       Serial.printf("Read not OK, result %d, give up at %" PRIu16 "\n", opResult, sliceID);
       return false;
     }
-    if (sliceL3.magic != sliceL3.Magic) {
-      Serial.printf("Magic not right, give up at %" PRIu16 "\n", sliceID);
+    if (sliceL2.magic != SensorSlice::Magic) {
+      Serial.printf("Magic not right (recorded %08" PRIx32 " != expected %08" PRIx32 "), give up at %" PRIu16 "\n", sliceL2.magic, SensorSlice::Magic, sliceID);
       return false;
     }
-    checksum = sliceL3.actualChecksum();
-    if (checksum != sliceL3.checksum) {
-      Serial.printf("Checksum mismatch, expected %016" PRIx16 ", found %016" PRIx16  "\n", checksum, sliceL3.checksum);
+    checksum = sliceL2.actualChecksum();
+    if (checksum != sliceL2.checksum) {
+      Serial.printf("Checksum mismatch, expected %016" PRIx16 ", found %016" PRIx16  "\n", checksum, sliceL2.checksum);
       return false;
     }
     return true;
@@ -320,16 +305,10 @@ struct SensorHistory {
 
     if (countL0 == MaxHistoryL0) {
       if (!headL0) {
-        if (countL1 == MaxHistoryL1) {
-          if (countL2 >= SensorSlice::MaxRecords) {
-            flushL2ToL3();
-          }
-          sliceL2.records[countL2++] = recordsL1[headL1];
-          recordsL1[headL1] = recordsL0[0];
-          headL1 = (headL1 + 1) & RingMaskL1;
-        } else {
-          recordsL1[(headL1 + countL1++) & RingMaskL1] = recordsL0[0];
+        if (countL1 == SensorSlice::MaxRecords) {
+          flushL1ToL2();
         }
+        sliceL1.records[countL1++] = recordsL0[0];
       }
       current = headL0;
       headL0 = (headL0 + 1) & RingMaskL0;
@@ -354,23 +333,23 @@ struct SensorHistory {
     /* recover slices */
     Serial.println("Recovering on-flash records...");
     for (sliceID = 0; sliceID < FlashSectCount; ++sliceID) {
-      if (!fetchToL3(sliceID)) {
+      if (!fetchToL2(sliceID)) {
         if (headFlash > 0) {
-          Serial.printf("Failed to fetch uncorrutped L3 at slice %" PRIu16 " and we had jumped back at %" PRIu16 ", use slices before jump back\n", sliceID, headFlash);
-          countL3 = headFlash;
+          Serial.printf("Failed to fetch uncorrutped L2 at slice %" PRIu16 " and we had jumped back at %" PRIu16 ", use slices before jump back\n", sliceID, headFlash);
+          countL2 = headFlash;
         } else {
-          Serial.printf("Failed to fetch uncorrutped L3 at slice %" PRIu16 ", use slices before it\n", sliceID);
-          countL3 = sliceID;
+          Serial.printf("Failed to fetch uncorrutped L2 at slice %" PRIu16 ", use slices before it\n", sliceID);
+          countL2 = sliceID;
         }
-        headL3 = 0;
+        headL2 = 0;
         return;
       }
-      unixThis = sliceL3.unixOffset + sliceL3.records[0].timestamp;
+      unixThis = sliceL2.unixOffset + sliceL2.records[0].timestamp;
       if (unixThis <= unixLast) { /* Jumping back, allowed only once */
         if (headFlash > 0) { /* Already go back once, not possible */
           Serial.printf("Flash slice %" PRIu16 " jump back when we already have %" PRIu16 " jump back, impossible, use slices before first jump back\n", sliceID, headFlash);
-          headL3 = 0;
-          countL3 = headFlash;
+          headL2 = 0;
+          countL2 = headFlash;
           return;
         }
         /* First time going back */
@@ -378,19 +357,13 @@ struct SensorHistory {
       } /* else, Most common case, going upward */
       unixLast = unixThis;
     }
-    headL3 = headFlash;
-    countL3 = FlashSectCount;
+    headL2 = headFlash;
+    countL2 = FlashSectCount;
   }
 
   void firstFetchAppend(uint32_t const millisCurrent) {
-    /* L0 */
     dht.begin();
     fetchAppend(millisCurrent / 1000, millisCurrent);
-    /* L2 */
-    sliceL2.unixOffset = ntpSyncer.unixOffset;
-    /* L3 */
-    recoverFlash();
-    Serial.printf("Recovered %" PRIu16 " slices from flash, head is %" PRIu16 "\n", countL3, headL3);
   }
 
   void maybeFetchAppend(uint32_t const millisCurrent) {
@@ -575,25 +548,22 @@ void httpHandleRawAll() {
 
   RawAllSender sender = {};
 
-  if (history.countL3 > 0) {
-    for (i = history.headL3; i < history.countL3; ++i) {
-      if (!history.fetchToL3(i)) {
-        continue;
-      }
-      sender.sendFullSlice(history.sliceL3);
-    }
-    for (i = 0; i < history.headL3; ++i) {
-      if (!history.fetchToL3(i)) {
-        continue;
-      }
-      sender.sendFullSlice(history.sliceL3);
-    }
-  }
   if (history.countL2 > 0) {
-    sender.sendPartialSlice(history.sliceL2, history.countL2);
+    for (i = history.headL2; i < history.countL2; ++i) {
+      if (!history.fetchToL2(i)) {
+        continue;
+      }
+      sender.sendFullSlice(history.sliceL2);
+    }
+    for (i = 0; i < history.headL2; ++i) {
+      if (!history.fetchToL2(i)) {
+        continue;
+      }
+      sender.sendFullSlice(history.sliceL2);
+    }
   }
   if (history.countL1 > 0) {
-    sender.sendRingRecords(history.recordsL1, history.headL1, history.countL1);
+    sender.sendPartialSlice(history.sliceL1, history.countL1);
   }
   if (history.countL0 > 0) {
     sender.sendRingRecords(history.recordsL0, history.headL0, history.countL0);
@@ -623,6 +593,7 @@ void setup() {
   static unsigned long const OneSecondAsMs = 1'000;
   static unsigned long const BaudRate = 115200;
 
+  bool recoverFlash = false;
   int8_t countNetworks, bestScanID;
   uint8_t i, *currentBSSID;
   int32_t bestRSSI, currentRSSI, currentChannel;
@@ -691,6 +662,14 @@ void setup() {
     WiFi.begin(WiFiSSID, WiFiPassword, WiFi.channel(bestScanID), WiFi.BSSID(bestScanID));
     WiFi.scanDelete();
 
+    if (!recoverFlash) {
+      /* This might be slow so do it before waiting for online */
+      history.recoverFlash();
+      if (history.countL2 > 0) {
+        Serial.printf("Recovered %" PRIu16 " slices from flash, head is %" PRIu16 "\n", history.countL2, history.headL2);
+      }
+      recoverFlash = true;
+    }
     for (i = 0; i < MaxWaits; ++i) {
       if (WiFi.status() == WL_CONNECTED) {
         break;
