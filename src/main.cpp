@@ -40,13 +40,12 @@ static ESP8266WebServer server(80);
 
 #define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 
-static uint32_t const NtpUnixOffset = 2208988800UL;
-static uint32_t const MinUnixOffset = 1776133834UL; /* Tue Apr 14 11:00:01 CST 2026, no specific reason */
-static uint32_t const MinNtp = NtpUnixOffset + MinUnixOffset;
-static uint64_t unixOffset = MinUnixOffset;
+struct NtpSyncer {
+  static uint32_t const NtpUnixOffset = 2208988800UL;
+  static uint32_t const MinUnixOffset = 1776133834UL; /* Tue Apr 14 11:00:01 CST 2026, no specific reason */
+  static uint32_t const MinNtp = NtpUnixOffset + MinUnixOffset;
 
-void getNtpOffset() {
-  static char const NtpServer[] =
+  static char constexpr NtpServer[] =
 #ifdef PRIVATE_NTP_SERVER
     PRIVATE_NTP_SERVER
 #else
@@ -61,61 +60,92 @@ void getNtpOffset() {
 #endif
       ;
 
-  uint8_t i;
-  uint32_t ntpOffset;
-  byte buffer[48] = {0b11100011, 0};
   IPAddress serverIP;
   WiFiUDP udp;
+  byte buffer[48];
+  uint32_t millisLast;
+  bool init, isIP;
 
-  /* This is the logic that would try from raw IP string first, so no extra call to it */
-  if (!WiFi.hostByName(NtpServer, serverIP)) {
-    Serial.printf("Failed to resolve '%s' to IP\n", NtpServer);
-    return;
-  }
-  if (!udp.begin(UdpPortNtp)) {
-    Serial.printf("Failed to listen on %" PRIu16 "\n", UdpPortNtp);
-    return;
-  }
-  if (!udp.beginPacket(serverIP, 123)) {
-    Serial.println("Failed to begin NTP packet");
-    return;
-  }
-  if (udp.write(buffer, sizeof buffer) != sizeof buffer) {
-    Serial.println("Failed to write whole NTP packet");
-    return;
-  }
-  if (!udp.endPacket()) {
-    Serial.println("Failed to end UDP packet");
-    return;
-  }
-  for (i = 0;;) {
-    if (udp.parsePacket()) {
-      break;
+  uint64_t unixOffset = MinUnixOffset;
+
+  void update(uint32_t const millisCurrent) {
+    uint8_t i;
+    uint32_t ntpOffset, naiveUnixOffset;
+
+    if (!init) {
+      if (!udp.begin(UdpPortNtp)) {
+        Serial.printf("Failed to listen on %" PRIu16 "\n", UdpPortNtp);
+        return;
+      }
+      if (serverIP.fromString(NtpServer)) {
+        isIP = true;
+      }
+      init = true;
     }
-    delay(100);
-    if (++i > 20) {
-      Serial.println("Timeout waiting for NTP response");
+    if (!isIP) {
+      if (!WiFi.hostByName(NtpServer, serverIP, 1000)) {
+        Serial.printf("Failed to resolve '%s' to IP\n", NtpServer);
+        return;
+      }
+    }
+    if (!udp.beginPacket(serverIP, 123)) {
+      Serial.println("Failed to begin NTP packet");
       return;
     }
+    buffer[0] = 0b11100011;
+    memset(buffer + 1, 0, sizeof(buffer) - 1);
+    if (udp.write(buffer, sizeof(buffer)) != sizeof(buffer)) {
+      Serial.println("Failed to write whole NTP packet");
+      return;
+    }
+    if (!udp.endPacket()) {
+      Serial.println("Failed to end UDP packet");
+      return;
+    }
+    for (i = 0;;) {
+      if (udp.parsePacket()) {
+        break;
+      }
+      delay(100);
+      if (++i > 20) {
+        Serial.println("Timeout waiting for NTP response");
+        return;
+      }
+    }
+    if (udp.read(buffer, sizeof buffer) != sizeof buffer) {
+      Serial.println("Failed to read NTP response");
+      return;
+    }
+    ntpOffset = ((uint32_t(word(buffer[40], buffer[41])) << 16) | word(buffer[42], buffer[43]));
+
+    naiveUnixOffset = ntpOffset - NtpUnixOffset;
+    if (ntpOffset < MinNtp) {
+      Serial.printf("NTP offset %" PRIu32 " < minimum NTP %" PRIu32 ", adding one era\n", ntpOffset, MinNtp);
+      unixOffset = 0x100000000ULL + naiveUnixOffset;
+    } else {
+      unixOffset = naiveUnixOffset;
+    }
+    unixOffset -= millis() / 1000;
+    Serial.printf("Current unix offset is %" PRIu64 "\n", unixOffset);
+    millisLast = millisCurrent;
   }
-  if (udp.read(buffer, sizeof buffer) != sizeof buffer) {
-    Serial.println("Failed to read NTP response");
-    return;
+
+  void firstUpdate(uint32_t const millisCurrent) {
+    update(millisCurrent);
   }
-  ntpOffset = ((uint32_t(word(buffer[40], buffer[41])) << 16) | word(buffer[42], buffer[43]));
-  if (ntpOffset < MinNtp) {
-    Serial.printf("NTP offset %" PRIu32 " < minimum NTP %" PRIu32 ", adding one era\n", ntpOffset, MinNtp);
-    unixOffset = 0x100000000ULL + ntpOffset - NtpUnixOffset;
-  } else {
-    unixOffset = ntpOffset - NtpUnixOffset;
+
+  void maybeUpdate(uint32_t const millisCurrent) {
+    /* Force update if not initialized yet, or */
+    if ((millisCurrent - millisLast) > 3600000UL || !init) {
+      update(millisCurrent);
+    }
   }
-  unixOffset -= millis() / 1000;
-  Serial.printf("Current unix offset is %" PRIu64 "\n", unixOffset);
-}
+};
+
+static NtpSyncer ntpSyncer = {};
 
 struct SensorRecord {
   static int const lenBuffer = 38; /* extreme 18446744073709551615,255.255,255.255\n */
-  typedef char (&BufferT)[lenBuffer];
 
   uint32_t timestamp; /* second */
   int8_t tempInt;
@@ -123,7 +153,8 @@ struct SensorRecord {
   uint8_t humidInt;
   uint8_t humidDot;
 
-  bool intoStr(BufferT buffer, size_t &len) {
+  /* buffer should be at least lenBuffer */
+  bool intoStr(uint64_t const unixOffset, char *const buffer, size_t &len) const {
     int const r = snprintf(buffer, lenBuffer, "%" PRIu64 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", unixOffset + timestamp, tempInt, tempDot, humidInt, humidDot);
 
     if (r < 0) {
@@ -137,31 +168,67 @@ struct SensorRecord {
       return true;
     }
   }
+};
 
-  bool intoStr(BufferT buffer) {
-    int const r = snprintf(buffer, lenBuffer, "%" PRIu64 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", unixOffset + timestamp, tempInt, tempDot, humidInt, humidDot);
+static_assert(sizeof(struct SensorRecord) == 8, "SensorRecord should have a size of 4");
 
-    return r > 0 && r < lenBuffer;
+struct SensorSlice {
+  static uint32_t const Magic = 0x82660C05;
+  static uint16_t const MaxRecords = 510;
+  static uint16_t const MaxRecordsSub1 = MaxRecords - 1;
+
+  uint32_t magic = Magic;
+  uint32_t checksum;
+  uint64_t unixOffset;
+  SensorRecord records[MaxRecords];
+
+  uint32_t actualChecksum() {
+    static uint16_t const Count32 = (MaxRecords + 1) * 2;
+
+    uint32_t const *const raw = reinterpret_cast<uint32_t const *>(&unixOffset);
+    uint32_t x = *raw;
+    uint16_t i;
+    for (i = 1; i < Count32; ++i) {
+      x ^= raw[i];
+    }
+    return x;
+  }
+
+  void shift() {
+    uint16_t recordID, recordIDNext;
+
+    for (recordID = 0; recordID < MaxRecordsSub1;) {
+      recordIDNext = recordID + 1;
+      records[recordID] = records[recordIDNext];
+      recordID = recordIDNext;
+    }
   }
 };
 
 struct SensorHistory {
   static uint8_t const MaxHistoryL0 = 1 << 5; /* 2s * 32, even secondly, for about a minute */
   static uint8_t const MaxHistoryL1 = 1 << 6; /* 64s * 64, minutely, for about an hour */
-  static uint16_t const MaxHistoryL2 = 1 << 12; /* 4096s * 4096, hourly, for about 194 days */
 
   static uint8_t const RingMaskL0 = MaxHistoryL0 - 1;
   static uint8_t const RingMaskL1 = MaxHistoryL1 - 1;
-  static uint16_t const RingMaskL2 = MaxHistoryL2 - 1;
 
-  SensorRecord entriesL2[MaxHistoryL2];
-  SensorRecord entriesL1[MaxHistoryL1];
-  SensorRecord entriesL0[MaxHistoryL0];
+  static uint32_t const FlashAddrStart = 0x100000;
+  static uint32_t const FlashAddrEnd = 0x3FB000;
+  static uint16_t const FlashSectSize = 4096;
+  static_assert(sizeof(struct SensorSlice) == FlashSectSize, "SensorSlice should have a size of 4096, same as sector size");
+  static uint16_t const FlashSectStart = FlashAddrStart / FlashSectSize;
+  static uint16_t const FlashSectEnd = FlashAddrEnd / FlashSectSize;
+  static uint16_t const FlashSectCount = FlashSectEnd - FlashSectStart;
+
+  SensorSlice sliceL2 = {.magic = SensorSlice::Magic}, sliceL3;
+  SensorRecord recordsL1[MaxHistoryL1];
+  SensorRecord recordsL0[MaxHistoryL0];
   uint32_t secondsLast = 0;
   uint32_t millisLast = 0;
   uint32_t secondsOffset = 0;
   uint32_t millisOffset = 0;
-  uint16_t headL2 = 0;
+  uint16_t countL3 = 0;
+  uint16_t headL3 = 0;
   uint16_t countL2 = 0;
   uint8_t headL1 = 0;
   uint8_t countL1 = 0;
@@ -169,40 +236,78 @@ struct SensorHistory {
   uint8_t countL0 = 0;
 
   SensorRecord &first() {
-    if (countL2 > 0) {
-      return entriesL2[headL2];
+    if (countL3 > 0 && fetchToL3(headL3)) {
+      return sliceL3.records[0];
+    } else if (countL2 > 0) {
+      return sliceL2.records[0];
     } else if (countL1 > 0) {
-      return entriesL1[headL1];
+      return recordsL1[headL1];
     } else {
-      return entriesL0[headL0];
+      return recordsL0[headL0];
     }
   }
 
   SensorRecord &last() {
-    return entriesL0[(headL0 + countL0 - 1) & RingMaskL0];
+    return recordsL0[(headL0 + countL0 - 1) & RingMaskL0];
   }
 
   SensorRecord &atL0(uint8_t const index) {
-    return entriesL0[(headL0 + index) & RingMaskL0];
+    return recordsL0[(headL0 + index) & RingMaskL0];
   }
 
   SensorRecord &atL1(uint8_t const index) {
-    return entriesL1[(headL1 + index) & RingMaskL1];
+    return recordsL1[(headL1 + index) & RingMaskL1];
   }
 
-  SensorRecord &atL2(uint16_t const index) {
-    return entriesL2[(headL2 + index) & RingMaskL2];
+  void flushL2ToL3() {
+    SpiFlashOpResult opResult;
+    uint16_t const sectorID = FlashSectStart + (headL3 + countL3) % FlashSectCount;
+
+    Serial.printf("Flushing L2 to flash sector %" PRIu16 "\n", sectorID);
+    sliceL2.unixOffset = ntpSyncer.unixOffset;
+    sliceL2.checksum = sliceL2.actualChecksum();
+    for (;;) {
+      opResult = spi_flash_erase_sector(sectorID);
+      if (opResult != SPI_FLASH_RESULT_OK) {
+        Serial.printf("Failed to erase sector %" PRIu16 "\n", sectorID);
+        break;
+      }
+      opResult = spi_flash_write(FlashAddrStart + sectorID * FlashSectSize, reinterpret_cast<uint32_t *>(&sliceL2), FlashSectSize);
+      if (opResult != SPI_FLASH_RESULT_OK) {
+        Serial.printf("Failed to write to sector %" PRIu16 "\n", sectorID);
+        break;
+      }
+      countL2 = 0;
+      if (countL3 == FlashSectCount) {
+        headL3 = (headL3 + 1) % FlashSectCount;
+      } else {
+        ++countL3;
+      }
+      return;
+    }
+    Serial.println("Failed to flush, shifting L2 by one position");
+    sliceL2.shift();
+    countL2 = SensorSlice::MaxRecordsSub1;
   }
 
-  SensorRecord &at(uint16_t index) {
-    if (index <= countL2) {
-      return atL2(index);
+  bool fetchToL3(uint16_t const sliceID) {
+    uint32_t checksum;
+    SpiFlashOpResult const opResult = spi_flash_read(FlashAddrStart + sliceID * sizeof(sliceL3), reinterpret_cast<uint32_t *>(&sliceL3), sizeof(sliceL3));
+
+    if (opResult != SPI_FLASH_RESULT_OK) {
+      Serial.printf("Read not OK, result %d, give up at %" PRIu16 "\n", opResult, sliceID);
+      return false;
     }
-    index -= countL2;
-    if (index <= countL1) {
-      return atL1(index);
+    if (sliceL3.magic != sliceL3.Magic) {
+      Serial.printf("Magic not right, give up at %" PRIu16 "\n", sliceID);
+      return false;
     }
-    return atL0(index - countL1);
+    checksum = sliceL3.actualChecksum();
+    if (checksum != sliceL3.checksum) {
+      Serial.printf("Checksum mismatch, expected %016" PRIx16 ", found %016" PRIx16  "\n", checksum, sliceL3.checksum);
+      return false;
+    }
+    return true;
   }
 
   void fetchAppend(uint32_t const secondsCurrent, uint32_t const millisCurrent) {
@@ -216,18 +321,14 @@ struct SensorHistory {
     if (countL0 == MaxHistoryL0) {
       if (!headL0) {
         if (countL1 == MaxHistoryL1) {
-          if (!headL1) {
-            if (countL2 == MaxHistoryL2) {
-              entriesL2[headL2] = entriesL1[0];
-              headL2 = (headL2 + 1) & RingMaskL2;
-            } else {
-              entriesL2[(headL2 + countL2++) & RingMaskL2] = entriesL1[0];
-            }
+          if (countL2 >= SensorSlice::MaxRecords) {
+            flushL2ToL3();
           }
-          entriesL1[headL1] = entriesL0[0];
+          sliceL2.records[countL2++] = recordsL1[headL1];
+          recordsL1[headL1] = recordsL0[0];
           headL1 = (headL1 + 1) & RingMaskL1;
         } else {
-          entriesL1[(headL1 + countL1++) & RingMaskL1] = entriesL0[0];
+          recordsL1[(headL1 + countL1++) & RingMaskL1] = recordsL0[0];
         }
       }
       current = headL0;
@@ -236,7 +337,7 @@ struct SensorHistory {
       current = (headL0 + countL0++) & RingMaskL0;
     }
 
-    record = entriesL0 + current;
+    record = recordsL0 + current;
 
     millisLast = millisCurrent;
     record->timestamp = secondsLast = secondsCurrent;
@@ -246,14 +347,53 @@ struct SensorHistory {
     record->tempDot = dht.data[3];
   }
 
-  void firstFetchAppend() {
-    uint32_t const millisCurrent = millis();
-    dht.begin();
-    fetchAppend(millisCurrent / 1000, millisCurrent);
+  void recoverFlash() {
+    uint16_t sliceID, headFlash = 0;
+    uint64_t unixLast = 0, unixThis;
+
+    /* recover slices */
+    Serial.println("Recovering on-flash records...");
+    for (sliceID = 0; sliceID < FlashSectCount; ++sliceID) {
+      if (!fetchToL3(sliceID)) {
+        if (headFlash > 0) {
+          Serial.printf("Failed to fetch uncorrutped L3 at slice %" PRIu16 " and we had jumped back at %" PRIu16 ", use slices before jump back\n", sliceID, headFlash);
+          countL3 = headFlash;
+        } else {
+          Serial.printf("Failed to fetch uncorrutped L3 at slice %" PRIu16 ", use slices before it\n", sliceID);
+          countL3 = sliceID;
+        }
+        headL3 = 0;
+        return;
+      }
+      unixThis = sliceL3.unixOffset + sliceL3.records[0].timestamp;
+      if (unixThis <= unixLast) { /* Jumping back, allowed only once */
+        if (headFlash > 0) { /* Already go back once, not possible */
+          Serial.printf("Flash slice %" PRIu16 " jump back when we already have %" PRIu16 " jump back, impossible, use slices before first jump back\n", sliceID, headFlash);
+          headL3 = 0;
+          countL3 = headFlash;
+          return;
+        }
+        /* First time going back */
+        headFlash = sliceID;
+      } /* else, Most common case, going upward */
+      unixLast = unixThis;
+    }
+    headL3 = headFlash;
+    countL3 = FlashSectCount;
   }
 
-  void maybeFetchAppend() {
-    uint32_t const millisCurrent = millis();
+  void firstFetchAppend(uint32_t const millisCurrent) {
+    /* L0 */
+    dht.begin();
+    fetchAppend(millisCurrent / 1000, millisCurrent);
+    /* L2 */
+    sliceL2.unixOffset = ntpSyncer.unixOffset;
+    /* L3 */
+    recoverFlash();
+    Serial.printf("Recovered %" PRIu16 " slices from flash, head is %" PRIu16 "\n", countL3, headL3);
+  }
+
+  void maybeFetchAppend(uint32_t const millisCurrent) {
     uint32_t const millisElasped = millisCurrent - millisLast;
 
     if (millisElasped >= 2000) {
@@ -271,7 +411,7 @@ struct SensorHistory {
   }
 };
 
-SensorHistory history = {};
+static SensorHistory history = {};
 
 void httpHandleLast() {
   static int const lenBuffer = 16;
@@ -366,58 +506,105 @@ void serverSendHeadersForRaw() {
 }
 #endif
 
-void httpHandleRawAll() {
+struct RawAllSender {
   static size_t const lenBuffer = 1024;
   static size_t const lenMax = lenBuffer - SensorRecord::lenBuffer;
 
   char buffer[lenBuffer];
-  union {
-    uint16_t i;
-    uint8_t j;
-  };
   size_t len;
   size_t offset = 0;
 
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  RawAllSender() {
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
 #ifdef PRIVATE_ALLOW_CROSS
-  serverSendHeadersForRaw();
+    serverSendHeadersForRaw();
 #endif
-  server.send(200, "text/plain", "", 0);
-  for (i = 0; i < history.countL2; ++i) {
-    if (history.atL2(i).intoStr(reinterpret_cast<SensorRecord::BufferT>(buffer[offset]), len)) {
+    server.send(200, "text/plain", "", 0);
+  }
+
+  void sendRecord(uint64_t const unixOffset, SensorRecord const &record) {
+    if (record.intoStr(unixOffset, buffer + offset, len)) {
       if ((offset += len) >= lenMax) {
         server.sendContent(buffer, offset);
         offset = 0;
       }
     }
   }
-  for (j = 0; j < history.countL1; ++j) {
-    if (history.atL1(j).intoStr(reinterpret_cast<SensorRecord::BufferT>(buffer[offset]), len)) {
-      if ((offset += len) >= lenMax) {
-        server.sendContent(buffer, offset);
-        offset = 0;
-      }
+
+  void sendRingRecords(SensorRecord const *records, uint8_t const head, uint8_t const count) {
+    uint64_t const unixOffset = ntpSyncer.unixOffset;
+    uint8_t i;
+
+    for (i = head; i < count; ++i) {
+      sendRecord(unixOffset, records[i]);
+    }
+    for (i = 0; i < head; ++i) {
+      sendRecord(unixOffset, records[i]);
     }
   }
-  for (j = 0; j < history.countL0; ++j) {
-    if (history.atL0(j).intoStr(reinterpret_cast<SensorRecord::BufferT>(buffer[offset]), len)) {
-      if ((offset += len) >= lenMax) {
-        server.sendContent(buffer, offset);
-        offset = 0;
-      }
+
+  void sendPartialSlice(SensorSlice const &slice, uint16_t const count) {
+    uint64_t const unixOffset = ntpSyncer.unixOffset;
+    uint16_t i;
+
+    for (i = 0; i < count; ++i) {
+      sendRecord(unixOffset, slice.records[i]);
     }
   }
-  if (offset) {
-    server.sendContent(buffer, offset);
+
+  void sendFullSlice(SensorSlice const &slice) {
+    uint64_t const unixOffset = slice.unixOffset;
+    uint16_t i;
+
+    /* maybe this would use immediate number in instruction, so dont call sendPartialSlice lazily */
+    for (i = 0; i < SensorSlice::MaxRecords; ++i) {
+      sendRecord(unixOffset, slice.records[i]);
+    }
   }
-  server.sendContent("", 0);
+
+  ~RawAllSender() {
+    if (offset) {
+      server.sendContent(buffer, offset);
+    }
+    server.sendContent("", 0);
+  }
+};
+
+void httpHandleRawAll() {
+  uint16_t i;
+
+  RawAllSender sender = {};
+
+  if (history.countL3 > 0) {
+    for (i = history.headL3; i < history.countL3; ++i) {
+      if (!history.fetchToL3(i)) {
+        continue;
+      }
+      sender.sendFullSlice(history.sliceL3);
+    }
+    for (i = 0; i < history.headL3; ++i) {
+      if (!history.fetchToL3(i)) {
+        continue;
+      }
+      sender.sendFullSlice(history.sliceL3);
+    }
+  }
+  if (history.countL2 > 0) {
+    sender.sendPartialSlice(history.sliceL2, history.countL2);
+  }
+  if (history.countL1 > 0) {
+    sender.sendRingRecords(history.recordsL1, history.headL1, history.countL1);
+  }
+  if (history.countL0 > 0) {
+    sender.sendRingRecords(history.recordsL0, history.headL0, history.countL0);
+  }
 }
 
 void httpHandleRawLast() {
   char buffer[SensorRecord::lenBuffer];
   size_t len;
 
-  if (history.last().intoStr(buffer, len)) {
+  if (history.last().intoStr(ntpSyncer.unixOffset, buffer, len)) {
 #ifdef PRIVATE_ALLOW_CROSS
     serverSendHeadersForRaw();
 #endif
@@ -439,6 +626,7 @@ void setup() {
   int8_t countNetworks, bestScanID;
   uint8_t i, *currentBSSID;
   int32_t bestRSSI, currentRSSI, currentChannel;
+  uint32_t millisCurrent;
   String const wantedSSID = String(WiFiSSID);
   String currentSSID;
 
@@ -448,7 +636,6 @@ void setup() {
   digitalWrite(PcPinReset, LOW);
 
   Serial.begin(BaudRate);
-  history.firstFetchAppend();
   WiFi.setHostname(HostName);
   WiFi.setAutoReconnect(true);
 
@@ -523,7 +710,9 @@ void setup() {
     delay(OneSecondAsMs);
   }
 
-  getNtpOffset();
+  millisCurrent = millis();
+  ntpSyncer.firstUpdate(millisCurrent);
+  history.firstFetchAppend(millisCurrent);
 
   server.on("/", HTTP_GET, httpHandleRoot);
   server.on("/last", HTTP_GET, httpHandleLast);
@@ -538,6 +727,10 @@ void setup() {
 }
 
 void loop() {
+  uint32_t millisCurrent;
+
   server.handleClient();
-  history.maybeFetchAppend();
+  millisCurrent = millis();
+  ntpSyncer.maybeUpdate(millisCurrent);
+  history.maybeFetchAppend(millisCurrent);
 }
