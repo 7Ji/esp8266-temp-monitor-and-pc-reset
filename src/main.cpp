@@ -109,6 +109,7 @@ void getNtpOffset() {
   } else {
     unixOffset = ntpOffset - NtpUnixOffset;
   }
+  unixOffset -= millis() / 1000;
   Serial.printf("Current unix offset is %" PRIu64 "\n", unixOffset);
 }
 
