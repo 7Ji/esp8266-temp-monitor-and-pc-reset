@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ESP8266 Temp/Humidity Monitor</title>
+  <title>Temp/Humidity Monitor</title>
   <style>
     :root {
       color-scheme: light;
@@ -73,7 +73,6 @@
 </head>
 <body>
   <main>
-    <h1>ESP8266 Temp/Humidity Monitor</h1>
     <section>
       <h2>Current</h2>
       <p>
@@ -82,30 +81,39 @@
         <span class="value">Uptime: <strong id="uptime">--</strong></span>
         <span class="value">Samples: <strong id="samples">--</strong></span>
       </p>
-      <p class="hint">Data routes: <code>/raw/last</code>, <code>/raw/all</code>, <code>/last</code></p>
     </section>
     <section>
-      <h2>History Views</h2>
+      <h2>History</h2>
       <p class="hint" id="graph-status">Loading history...</p>
       <div class="graph-grid">
         <article class="graph-panel">
-          <h3>Last Minute</h3>
-          <p class="subtitle" id="summary-minute">Avg Temp -- | Avg Humidity -- | Samples --</p>
-          <canvas class="graph" id="graph-minute" width="520" height="260"></canvas>
-        </article>
-        <article class="graph-panel">
           <h3>Last 5 Minutes</h3>
-          <p class="subtitle" id="summary-five-minutes">Avg Temp -- | Avg Humidity -- | Samples --</p>
+          <p class="subtitle" id="summary-five-minutes">Avg --  -- @ --</p>
           <canvas class="graph" id="graph-five-minutes" width="520" height="260"></canvas>
         </article>
         <article class="graph-panel">
-          <h3>Last 15 Minutes</h3>
-          <p class="subtitle" id="summary-fifteen-minutes">Avg Temp -- | Avg Humidity -- | Samples --</p>
-          <canvas class="graph" id="graph-fifteen-minutes" width="520" height="260"></canvas>
+          <h3>Last Hour</h3>
+          <p class="subtitle" id="summary-hour">Avg --  -- @ --</p>
+          <canvas class="graph" id="graph-hour" width="520" height="260"></canvas>
+        </article>
+        <article class="graph-panel">
+          <h3>Last Day</h3>
+          <p class="subtitle" id="summary-day">Avg --  -- @ --</p>
+          <canvas class="graph" id="graph-day" width="520" height="260"></canvas>
+        </article>
+        <article class="graph-panel">
+          <h3>Last Week</h3>
+          <p class="subtitle" id="summary-week">Avg --  -- @ --</p>
+          <canvas class="graph" id="graph-week" width="520" height="260"></canvas>
+        </article>
+        <article class="graph-panel">
+          <h3>Last Month</h3>
+          <p class="subtitle" id="summary-month">Avg --  -- @ --</p>
+          <canvas class="graph" id="graph-month" width="520" height="260"></canvas>
         </article>
         <article class="graph-panel">
           <h3>All History</h3>
-          <p class="subtitle" id="summary-all">Avg Temp -- | Avg Humidity -- | Samples --</p>
+          <p class="subtitle" id="summary-all">Avg --  -- @ --</p>
           <canvas class="graph" id="graph-all" width="520" height="260"></canvas>
         </article>
       </div>
@@ -115,28 +123,46 @@
     const urlParams = new URLSearchParams(window.location.search);
     const graphConfigs = [
       {
-        key: 'minute',
-        canvasId: 'graph-minute',
-        summaryId: 'summary-minute',
-        windowSeconds: 60,
-      },
-      {
         key: 'five-minutes',
         canvasId: 'graph-five-minutes',
         summaryId: 'summary-five-minutes',
         windowSeconds: 5 * 60,
+        boundaryUnit: null,
       },
       {
-        key: 'fifteen-minutes',
-        canvasId: 'graph-fifteen-minutes',
-        summaryId: 'summary-fifteen-minutes',
-        windowSeconds: 15 * 60,
+        key: 'hour',
+        canvasId: 'graph-hour',
+        summaryId: 'summary-hour',
+        windowSeconds: 60 * 60,
+        boundaryUnit: 'five-minute',
+      },
+      {
+        key: 'day',
+        canvasId: 'graph-day',
+        summaryId: 'summary-day',
+        windowSeconds: 24 * 60 * 60,
+        boundaryUnit: 'hour',
+      },
+      {
+        key: 'week',
+        canvasId: 'graph-week',
+        summaryId: 'summary-week',
+        windowSeconds: 7 * 24 * 60 * 60,
+        boundaryUnit: 'day',
+      },
+      {
+        key: 'month',
+        canvasId: 'graph-month',
+        summaryId: 'summary-month',
+        windowSeconds: 30 * 24 * 60 * 60,
+        boundaryUnit: 'week',
       },
       {
         key: 'all',
         canvasId: 'graph-all',
         summaryId: 'summary-all',
         windowSeconds: null,
+        boundaryUnit: null,
       }
     ];
     const graphStates = {};
@@ -298,6 +324,65 @@
       return entry && Number.isFinite(entry.wallClockMs) ? formatWallClockMs(entry.wallClockMs) : '--';
     }
 
+    function nextBoundaryAfter(boundaryUnit, wallClockMs) {
+      const date = new Date(wallClockMs);
+
+      if (boundaryUnit === 'five-minute') {
+        date.setSeconds(0, 0);
+        date.setMinutes(Math.floor(date.getMinutes() / 5) * 5);
+        date.setMinutes(date.getMinutes() + 5);
+        return date.getTime();
+      }
+
+      if (boundaryUnit === 'hour') {
+        date.setMinutes(0, 0, 0);
+        date.setHours(date.getHours() + 1);
+        return date.getTime();
+      }
+
+      if (boundaryUnit === 'day') {
+        date.setHours(0, 0, 0, 0);
+        date.setDate(date.getDate() + 1);
+        return date.getTime();
+      }
+
+      if (boundaryUnit === 'week') {
+        date.setHours(0, 0, 0, 0);
+        const day = date.getDay();
+        const daysUntilMonday = day === 0 ? 1 : 8 - day;
+        date.setDate(date.getDate() + daysUntilMonday);
+        return date.getTime();
+      }
+
+      return NaN;
+    }
+
+    function advanceBoundary(boundaryUnit, wallClockMs) {
+      const date = new Date(wallClockMs);
+
+      if (boundaryUnit === 'five-minute') {
+        date.setMinutes(date.getMinutes() + 5);
+        return date.getTime();
+      }
+
+      if (boundaryUnit === 'hour') {
+        date.setHours(date.getHours() + 1);
+        return date.getTime();
+      }
+
+      if (boundaryUnit === 'day') {
+        date.setDate(date.getDate() + 1);
+        return date.getTime();
+      }
+
+      if (boundaryUnit === 'week') {
+        date.setDate(date.getDate() + 7);
+        return date.getTime();
+      }
+
+      return NaN;
+    }
+
     function stampHistoryFromEntry(anchorEntry) {
       if (!anchorEntry || !Number.isFinite(anchorEntry.timestamp) || !Number.isFinite(anchorEntry.wallClockMs)) {
         return;
@@ -361,9 +446,7 @@
       });
 
       return (
-        'Avg Temp ' + (sumTemperature / entries.length).toFixed(2) + ' C | ' +
-        'Avg Humidity ' + (sumHumidity / entries.length).toFixed(2) + ' % | ' +
-        'Samples ' + entries.length
+        'Avg ' + (sumTemperature / entries.length).toFixed(2) + ' C / ' + (sumHumidity / entries.length).toFixed(2) + ' % @ ' + entries.length
       );
     }
 
@@ -485,6 +568,23 @@
       ctx.fillText(formatGraphTimestamp(entries[0]), marginLeft, height - 8);
       ctx.textAlign = 'right';
       ctx.fillText(formatGraphTimestamp(entries[entries.length - 1]), width - marginRight, height - 8);
+
+      if (config.boundaryUnit) {
+        let boundaryMs = nextBoundaryAfter(config.boundaryUnit, firstTime);
+
+        ctx.save();
+        ctx.setLineDash([2, 4]);
+        ctx.strokeStyle = '#d0d0d0';
+        while (Number.isFinite(boundaryMs) && boundaryMs < lastTime) {
+          const boundaryX = marginLeft + (boundaryMs - firstTime) * (width - marginLeft - marginRight) / timeSpan;
+          ctx.beginPath();
+          ctx.moveTo(boundaryX, marginTop);
+          ctx.lineTo(boundaryX, height - marginBottom);
+          ctx.stroke();
+          boundaryMs = advanceBoundary(config.boundaryUnit, boundaryMs);
+        }
+        ctx.restore();
+      }
 
       ctx.strokeStyle = '#c62828';
       ctx.beginPath();
@@ -654,7 +754,7 @@
       document.getElementById('humidity').textContent = currentEntry.humidity.toFixed(1);
       document.getElementById('uptime').textContent = formatUptime(currentEntry.timestamp);
       document.getElementById('samples').textContent = String(historyEntries.length);
-      document.getElementById('graph-status').textContent = 'Red = temperature (C) uses the left axis, blue = humidity (%) uses the right axis; graphs use anchored wall-clock time.';
+      document.getElementById('graph-status').textContent = 'Red = temperature (C) uses the left axis, blue = humidity (%) uses the right axis';
       drawAllGraphs();
     }
 
