@@ -48,7 +48,34 @@ static ESP8266WebServer server(80);
 
 #define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 
+struct UpTimer {
+  COMPCONST uint32_t const MillisSafeMax = UINT32_MAX - OneSecondAsMs;
+
+  uint32_t secondsOffset = 0;
+  uint32_t millisOffset = 0;
+  uint32_t millisLast = 0;
+
+  void tick(uint32_t const millisCurrent) {
+    if (millisCurrent < millisLast) { /* overflow */
+      /* UINT32_MAX = 0xFFFFFFFF = 4294967295 */
+      secondsOffset += 4294967;
+      millisOffset += 295;
+      while (millisOffset >= OneSecondAsMs) {
+        millisOffset -= OneSecondAsMs;
+        secondsOffset += 1;
+      }
+    }
+  }
+
+  uint32_t upSeconds(uint32_t const millisCurrent) const {
+    return secondsOffset + (millisCurrent + (millisCurrent > MillisSafeMax ? 0 : millisOffset)) / OneSecondAsMs;
+  }
+};
+
+static UpTimer upTimer = {};
+
 struct NtpSyncer {
+  COMPCONST uint32_t const MinInterval = 3600000UL;
   COMPCONST uint32_t const NtpUnixOffset = 2208988800UL;
   COMPCONST uint32_t const MinUnixOffset = 1776133834UL; /* Tue Apr 14 11:00:01 CST 2026, no specific reason */
   COMPCONST uint32_t const MinNtp = NtpUnixOffset + MinUnixOffset;
@@ -133,9 +160,9 @@ struct NtpSyncer {
     } else {
       unixOffset = naiveUnixOffset;
     }
-    unixOffset -= millisCurrent / 1000;
-    Serial.printf("Current unix offset is %" PRIu64 "\n", unixOffset);
+    unixOffset -= upTimer.upSeconds(millisCurrent);
     millisLast = millisCurrent;
+    Serial.printf("Current unix offset is %" PRIu64 "\n", unixOffset);
   }
 
   void firstUpdate(uint32_t const millisCurrent) {
@@ -144,7 +171,7 @@ struct NtpSyncer {
 
   void maybeUpdate(uint32_t const millisCurrent) {
     /* Force update if not initialized yet, or */
-    if ((millisCurrent - millisLast) > 3600000UL || !init) {
+    if ((millisCurrent - millisLast) >= MinInterval || !init) {
       update(millisCurrent);
     }
   }
@@ -230,6 +257,7 @@ struct SensorSlice {
 };
 
 struct SensorHistory {
+  COMPCONST uint32_t const MinInterval = 2000;
   COMPCONST uint8_t const MaxHistoryL0 = 1 << 5; /* 2s * 32, even secondly, for about a minute */
 
   COMPCONST uint8_t const RingMaskL0 = MaxHistoryL0 - 1;
@@ -263,10 +291,7 @@ struct SensorHistory {
     uint32_t sliceL2Raw[sizeof(SensorSlice) / sizeof(uint32_t)];
   };
   SensorRecord recordsL0[MaxHistoryL0];
-  uint32_t secondsLast = 0;
   uint32_t millisLast = 0;
-  uint32_t secondsOffset = 0;
-  uint32_t millisOffset = 0;
   uint16_t countL2 = 0; /* page */
   uint16_t headL2 = 0; /* sector */
   uint16_t countL1 = 0;
@@ -478,7 +503,7 @@ struct SensorHistory {
     }
   }
 
-  void fetchAppend(uint32_t const secondsCurrent, uint32_t const millisCurrent) {
+  void fetchAppend(uint32_t const millisCurrent) {
     struct SensorRecord * record;
     uint16_t current;
 
@@ -502,7 +527,7 @@ struct SensorHistory {
     record = recordsL0 + current;
 
     millisLast = millisCurrent;
-    record->timestamp = secondsLast = secondsCurrent;
+    record->timestamp = upTimer.upSeconds(millisCurrent);
     record->humidInt = dht.data[0];
     record->humidDot = dht.data[1];
     record->tempInt =  static_cast<int8_t>(dht.data[2]);
@@ -511,23 +536,12 @@ struct SensorHistory {
 
   void firstFetchAppend(uint32_t const millisCurrent) {
     dht.begin();
-    fetchAppend(millisCurrent / 1000, millisCurrent);
+    fetchAppend(millisCurrent);
   }
 
   void maybeFetchAppend(uint32_t const millisCurrent) {
-    uint32_t const millisElasped = millisCurrent - millisLast;
-
-    if (millisElasped >= 2000) {
-      if (millisCurrent < millisLast) { /* overflow */
-        /* UINT32_MAX = 0xFFFFFFFF = 4294967295 */
-        secondsOffset += 4294967;
-        millisOffset += 295;
-        while (millisOffset >= 1000) {
-          millisOffset -= 1000;
-          secondsOffset += 1;
-        }
-      }
-      fetchAppend(secondsOffset + (millisCurrent + millisOffset) / 1000, millisCurrent);
+    if (millisCurrent - millisLast >= MinInterval) {
+      fetchAppend(millisCurrent);
     }
   }
 };
@@ -851,6 +865,7 @@ void loop() {
 
   server.handleClient();
   millisCurrent = millis();
+  upTimer.tick(millisCurrent);
   ntpSyncer.maybeUpdate(millisCurrent);
   history.maybeFetchAppend(millisCurrent);
 }
