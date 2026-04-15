@@ -8,21 +8,29 @@ static_assert(sizeof(unsigned long) == sizeof(uint32_t), "unsigned long (would r
 
 #include "root.html.h"
 
-static char const ErrorStringWouldTruncate[] PROGMEM = "String Would Truncate";
-static char const ErrorStringFormatFailure[] PROGMEM = "String Format Failure";
-static char const ErrorNotFound[] PROGMEM = "Not Found";
-static char const PcPowerOk[] PROGMEM = "Power button pulse sent";
-static char const PcResetOk[] PROGMEM = "Reset button pulse sent";
+#define COMPCONST static inline constexpr
 
-static uint8_t const MaxWaits = 20;
-static uint8_t const PcPinPower =
+COMPCONST char const ConfigHostName[] = PRIVATE_HOSTNAME;
+COMPCONST char const ConfigWiFiSSID[] = PRIVATE_WIFI_SSID;
+COMPCONST char const ConfigWiFiPassword[] = PRIVATE_WIFI_PASSWORD;
+COMPCONST unsigned long const ConfigBaudRate = 115200;
+
+COMPCONST char const ErrorStringWouldTruncate[] PROGMEM = "String Would Truncate";
+COMPCONST char const ErrorStringFormatFailure[] PROGMEM = "String Format Failure";
+COMPCONST char const ErrorNotFound[] PROGMEM = "Not Found";
+COMPCONST char const PcPowerOk[] PROGMEM = "Power button pulse sent";
+COMPCONST char const PcResetOk[] PROGMEM = "Reset button pulse sent";
+
+COMPCONST unsigned long const OneSecondAsMs = 1'000;
+COMPCONST uint8_t const MaxWaits = 20;
+COMPCONST uint8_t const PcPinPower =
 #ifdef PRIVATE_PIN_POWER
 PRIVATE_PIN_POWER
 #else
 D1
 #endif
 ;
-static uint8_t const PcPinReset =
+COMPCONST uint8_t const PcPinReset =
 #ifdef PRIVATE_PIN_RESET
 PRIVATE_PIN_RESET
 #else
@@ -41,18 +49,18 @@ static ESP8266WebServer server(80);
 #define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 
 struct NtpSyncer {
-  static uint32_t const NtpUnixOffset = 2208988800UL;
-  static uint32_t const MinUnixOffset = 1776133834UL; /* Tue Apr 14 11:00:01 CST 2026, no specific reason */
-  static uint32_t const MinNtp = NtpUnixOffset + MinUnixOffset;
+  COMPCONST uint32_t const NtpUnixOffset = 2208988800UL;
+  COMPCONST uint32_t const MinUnixOffset = 1776133834UL; /* Tue Apr 14 11:00:01 CST 2026, no specific reason */
+  COMPCONST uint32_t const MinNtp = NtpUnixOffset + MinUnixOffset;
 
-  static char constexpr NtpServer[] =
+  COMPCONST char NtpServer[] =
 #ifdef PRIVATE_NTP_SERVER
     PRIVATE_NTP_SERVER
 #else
     "pool.ntp.org"
 #endif
       ;
-  static uint16_t const UdpPortNtp =
+  COMPCONST uint16_t const UdpPortNtp =
 #ifdef PRIVATE_NTP_LOCAL_PORT
     PRIVATE_NTP_LOCAL_PORT
 #else
@@ -125,7 +133,7 @@ struct NtpSyncer {
     } else {
       unixOffset = naiveUnixOffset;
     }
-    unixOffset -= millis() / 1000;
+    unixOffset -= millisCurrent / 1000;
     Serial.printf("Current unix offset is %" PRIu64 "\n", unixOffset);
     millisLast = millisCurrent;
   }
@@ -145,7 +153,8 @@ struct NtpSyncer {
 static NtpSyncer ntpSyncer = {};
 
 struct SensorRecord {
-  static int const lenBuffer = 38; /* extreme 18446744073709551615,255.255,255.255\n */
+  COMPCONST int const lenBuffer = 38; /* extreme 18446744073709551615,255.255,255.255\n */
+  COMPCONST int const lenBufferShort = 16; /* extreme 255.255,255.255\0 */
 
   uint32_t timestamp; /* second */
   int8_t tempInt;
@@ -173,9 +182,10 @@ struct SensorRecord {
 static_assert(sizeof(struct SensorRecord) == 8, "SensorRecord should have a size of 4");
 
 struct SensorSlice {
-  static uint32_t const Magic = 0x82660C05;
-  static uint16_t const MaxRecords = 510;
-  static uint16_t const MaxRecordsSub1 = MaxRecords - 1;
+  COMPCONST uint32_t const Magic = 0x82660C05;
+  COMPCONST uint16_t const MaxRecords = 30;
+  COMPCONST uint16_t const MaxRecordsSub1 = MaxRecords - 1;
+  COMPCONST uint16_t const Count32 = (MaxRecords + 1) * 2;
 
   uint32_t magic = Magic;
   uint32_t checksum;
@@ -183,8 +193,6 @@ struct SensorSlice {
   SensorRecord records[MaxRecords];
 
   uint32_t actualChecksum() {
-    static uint16_t const Count32 = (MaxRecords + 1) * 2;
-
     uint32_t const *const raw = reinterpret_cast<uint32_t const *>(&unixOffset);
     uint32_t x = *raw;
     uint16_t i;
@@ -206,32 +214,48 @@ struct SensorSlice {
 };
 
 struct SensorHistory {
-  static uint8_t const MaxHistoryL0 = 1 << 5; /* 2s * 32, even secondly, for about a minute */
+  COMPCONST uint8_t const MaxHistoryL0 = 1 << 5; /* 2s * 32, even secondly, for about a minute */
 
-  static uint8_t const RingMaskL0 = MaxHistoryL0 - 1;
+  COMPCONST uint8_t const RingMaskL0 = MaxHistoryL0 - 1;
 
-  static uint32_t const FlashAddrStart = 0x100000;
-  static uint32_t const FlashAddrEnd = 0x3FB000;
-  static uint16_t const FlashSectSize = 4096;
-  static_assert(sizeof(struct SensorSlice) == FlashSectSize, "SensorSlice should have a size of 4096, same as sector size");
-  static uint16_t const FlashSectStart = FlashAddrStart / FlashSectSize;
-  static uint16_t const FlashSectEnd = FlashAddrEnd / FlashSectSize;
-  static uint16_t const FlashSectCount = FlashSectEnd - FlashSectStart;
+  COMPCONST uint32_t const FlashAddrStart = 0x100000;
+  COMPCONST uint32_t const FlashAddrEnd = 0x3FB000;
+  COMPCONST int const FlashSectExp = 12;
+  COMPCONST uint16_t const FlashSectSize = 1 << FlashSectExp; /* 4096 */
+  COMPCONST uint16_t const FlashSectStart = FlashAddrStart / FlashSectSize;
+  COMPCONST uint16_t const FlashSectEnd = FlashAddrEnd / FlashSectSize;
+  COMPCONST uint16_t const FlashSectCount = FlashSectEnd - FlashSectStart;
+  COMPCONST int const FlashSectPageFactor = 4;
+  COMPCONST uint8_t const FlashSectPageCount = 1 << FlashSectPageFactor;
+  COMPCONST uint16_t const FlashPageSize = 1 << (FlashSectExp - FlashSectPageFactor); /* 256 */
+  static_assert(sizeof(struct SensorSlice) == FlashPageSize, "SensorSlice should have the same size as page");
+  COMPCONST uint16_t const FlashPageInSectMask = FlashSectPageCount - 1;
+  COMPCONST uint16_t const FlashPageStart = FlashAddrStart / FlashPageSize;
+  COMPCONST uint16_t const FlashPageEnd = FlashAddrEnd / FlashPageSize;
+  COMPCONST uint16_t const FlashPageCount = FlashPageEnd - FlashPageStart;
+  COMPCONST uint16_t const FlashPageCountSubSect = FlashPageCount - FlashSectPageCount;
 
-  SensorSlice sliceL1 = {.magic = SensorSlice::Magic}, sliceL2; /* about minutely, flush to flash every 510 minutes */
+  union {
+    SensorSlice sliceL1 = {.magic = SensorSlice::Magic};
+    uint32_t sliceL1Raw[sizeof(SensorSlice) / sizeof(uint32_t)];
+  };
+  union {
+    SensorSlice sliceL2; /* about minutely, flush to flash every 30 minutes */
+    uint32_t sliceL2Raw[sizeof(SensorSlice) / sizeof(uint32_t)];
+  };
   SensorRecord recordsL0[MaxHistoryL0];
   uint32_t secondsLast = 0;
   uint32_t millisLast = 0;
   uint32_t secondsOffset = 0;
   uint32_t millisOffset = 0;
-  uint16_t countL2 = 0;
-  uint16_t headL2 = 0;
+  uint16_t countL2 = 0; /* page */
+  uint16_t headL2 = 0; /* sector */
   uint16_t countL1 = 0;
   uint8_t headL0 = 0;
   uint8_t countL0 = 0;
 
   SensorRecord &first() {
-    if (countL2 > 0 && fetchToL2(headL2)) {
+    if (countL2 > 0 && fetchL2(headL2)) {
       return sliceL2.records[0];
     } else if (countL1 > 0) {
       return sliceL1.records[0];
@@ -244,55 +268,137 @@ struct SensorHistory {
     return recordsL0[(headL0 + countL0 - 1) & RingMaskL0];
   }
 
-  void flushL1ToL2() {
+  bool erase(uint16_t const sectorID) {
+    uint16_t const flashSectorID = sectorID + FlashSectStart;
     SpiFlashOpResult opResult;
-    uint16_t const sectorID = FlashSectStart + (headL2 + countL2) % FlashSectCount;
 
-    Serial.printf("Flushing L1 to L2 flash sector %" PRIu16 "\n", sectorID);
-    sliceL1.unixOffset = ntpSyncer.unixOffset;
-    sliceL1.checksum = sliceL1.actualChecksum();
-    for (;;) {
-      opResult = spi_flash_erase_sector(sectorID);
-      if (opResult != SPI_FLASH_RESULT_OK) {
-        Serial.printf("Failed to erase sector %" PRIu16 "\n", sectorID);
-        break;
-      }
-      opResult = spi_flash_write(sectorID * FlashSectSize, reinterpret_cast<uint32_t *>(&sliceL1), FlashSectSize);
-      if (opResult != SPI_FLASH_RESULT_OK) {
-        Serial.printf("Failed to write to sector %" PRIu16 "\n", sectorID);
-        break;
-      }
-      countL1 = 0;
-      if (countL2 == FlashSectCount) {
-        headL2 = (headL2 + 1) % FlashSectCount;
-      } else {
-        ++countL2;
-      }
-      return;
+    Serial.printf("Erasing sector %" PRIu16 " /f%" PRIu16 "\n", sectorID, flashSectorID);
+    opResult = spi_flash_erase_sector(flashSectorID);
+    if (opResult != SPI_FLASH_RESULT_OK) {
+      Serial.printf("Failed to erase sector %" PRIu16 "/f%" PRIu16 ", op result %d\n", sectorID, flashSectorID, opResult);
+      return false;
     }
-    Serial.println("Failed to flush, shifting L2 by one position");
+    return true;
+  }
+
+  bool writeL1(uint16_t const pageID) {
+    uint16_t const flashPageID = pageID + FlashPageStart;
+    SpiFlashOpResult opResult;
+
+    Serial.printf("Writing L1 to page %" PRIu16 " /f%" PRIu16 "\n", pageID, flashPageID);
+    opResult = spi_flash_write(flashPageID * FlashPageSize, sliceL1Raw, FlashPageSize);
+    if (opResult != SPI_FLASH_RESULT_OK) {
+      Serial.printf("Failed to write L1 to page %" PRIu16 " /f%" PRIu16 ", op result %d\n", pageID, flashPageID, opResult);
+      return false;
+    }
+    return true;
+  }
+
+  void fallbackShift() {
+    Serial.println("Falling back to shift L1 by one position");
     sliceL1.shift();
     countL1 = SensorSlice::MaxRecordsSub1;
   }
 
-  bool fetchToL2(uint16_t const sliceID) {
+  void flushL1L2() {
+    uint16_t const pageID = ((headL2 << FlashSectPageFactor) + countL2) % FlashPageCount;
+    bool const afterBoundary = pageID & FlashPageInSectMask;
+
+    Serial.printf("Flushing L1 to L2 flash page %" PRIu16 "\n", pageID);
+
+    if (!afterBoundary) {
+      /* Whether we successfully erase the sector or not, consider pages on it bad */
+      if (countL2 > FlashPageCountSubSect) { /* Technically this could only be countL2 == FlashPageCount, but do this securely */
+        headL2 = (headL2 + 1) % FlashSectCount;
+        countL2 = FlashPageCountSubSect;
+      }
+      if (!erase(pageID >> FlashSectPageFactor)) {
+        fallbackShift();
+        return;
+      }
+    }
+    sliceL1.unixOffset = ntpSyncer.unixOffset;
+    sliceL1.checksum = sliceL1.actualChecksum();
+    if (!writeL1(pageID)) {
+      fallbackShift();
+      return;
+    }
+    countL1 = 0;
+    ++countL2;
+  }
+
+  bool fetchL2(uint16_t const pageID) {
+    uint16_t const flashPageID = pageID + FlashPageStart;
     uint32_t checksum;
-    SpiFlashOpResult const opResult = spi_flash_read(FlashAddrStart + sliceID * sizeof(sliceL2), reinterpret_cast<uint32_t *>(&sliceL2), sizeof(sliceL2));
+    SpiFlashOpResult opResult;
+
+    opResult = spi_flash_read(flashPageID * FlashPageSize, sliceL2Raw, FlashPageSize);
 
     if (opResult != SPI_FLASH_RESULT_OK) {
-      Serial.printf("Read not OK, result %d, give up at %" PRIu16 "\n", opResult, sliceID);
+      Serial.printf("fetch %" PRIu16 "/f%" PRIu16 ": Read not OK, op result %d\n", pageID, flashPageID, opResult);
       return false;
     }
     if (sliceL2.magic != SensorSlice::Magic) {
-      Serial.printf("Magic not right (recorded %08" PRIx32 " != expected %08" PRIx32 "), give up at %" PRIu16 "\n", sliceL2.magic, SensorSlice::Magic, sliceID);
+      Serial.printf("fetch %" PRIu16 "/f%" PRIu16 ": Magic not right (recorded %08" PRIx32 " != expected %08" PRIx32 ")\n", pageID, flashPageID, sliceL2.magic, SensorSlice::Magic);
       return false;
     }
     checksum = sliceL2.actualChecksum();
     if (checksum != sliceL2.checksum) {
-      Serial.printf("Checksum mismatch, expected %016" PRIx16 ", found %016" PRIx16  "\n", checksum, sliceL2.checksum);
+      Serial.printf("fetch %" PRIu16 "/f%" PRIu16 ": Checksum mismatch, expected %016" PRIx16 ", found %016" PRIx16  "\n", pageID, flashPageID, checksum, sliceL2.checksum);
       return false;
     }
     return true;
+  }
+
+  void recoverFlash() {
+    uint16_t pageID, sectorID = 0;
+    uint64_t unixLast = 0, unixThis, unixFirst = 0;
+    bool first = true;
+
+    /* recover slices */
+    Serial.println("Recovering on-flash records...");
+    for (pageID = 0; pageID < FlashPageCount; ++pageID) {
+      if (!fetchL2(pageID)) {
+        if (sectorID > 0) {
+          Serial.printf("Failed to fetch uncorrutped L2 at page %" PRIu16 " and we had jumped back at sector %" PRIu16 ", use pages before jump back\n", pageID, sectorID);
+          countL2 = sectorID << FlashSectPageFactor;
+        } else {
+          Serial.printf("Failed to fetch uncorrutped L2 at page %" PRIu16 ", use pages before it\n", pageID);
+          countL2 = pageID;
+        }
+        headL2 = 0;
+        return;
+      }
+      unixThis = sliceL2.unixOffset + sliceL2.records[0].timestamp;
+      if (first) {
+        unixFirst = unixThis;
+        first = false;
+      }
+      if (unixThis <= unixLast) { /* Jumping back, allowed only once */
+        if (sectorID > 0) { /* Already go back once, not possible */
+          Serial.printf("Flash page %" PRIu16 " jump back when we already have sector %" PRIu16 " jump back, impossible, use pages before first jump back\n", pageID, sectorID);
+          headL2 = 0;
+          countL2 = sectorID << FlashSectPageFactor;
+          return;
+        } else if (pageID & FlashPageInSectMask) {
+          Serial.printf("Flash page %" PRIu16 " jump back inside sector, impossible, use pages before it\n", pageID);
+          headL2 = 0;
+          countL2 = pageID;
+          return;
+        }
+        /* First time jumping back */
+        sectorID = pageID >> FlashSectPageFactor;
+      } /* else, Most common case, going upward */
+      unixLast = unixThis;
+    }
+    if (sectorID > 0 && unixFirst <= unixLast) {
+      Serial.printf("Flash jumped back at sector %" PRIu16 " yet the first unix offset %" PRIu64 " is not larger than last offset %" PRIu64 ", use pages before jumping back\n", sectorID, unixFirst, unixLast);
+      headL2 = 0;
+      countL2 = sectorID << FlashSectPageFactor;
+    } else {
+      headL2 = sectorID;
+      countL2 = FlashPageCount;
+    }
   }
 
   void fetchAppend(uint32_t const secondsCurrent, uint32_t const millisCurrent) {
@@ -306,7 +412,7 @@ struct SensorHistory {
     if (countL0 == MaxHistoryL0) {
       if (!headL0) {
         if (countL1 == SensorSlice::MaxRecords) {
-          flushL1ToL2();
+          flushL1L2();
         }
         sliceL1.records[countL1++] = recordsL0[0];
       }
@@ -324,41 +430,6 @@ struct SensorHistory {
     record->humidDot = dht.data[1];
     record->tempInt =  static_cast<int8_t>(dht.data[2]);
     record->tempDot = dht.data[3];
-  }
-
-  void recoverFlash() {
-    uint16_t sliceID, headFlash = 0;
-    uint64_t unixLast = 0, unixThis;
-
-    /* recover slices */
-    Serial.println("Recovering on-flash records...");
-    for (sliceID = 0; sliceID < FlashSectCount; ++sliceID) {
-      if (!fetchToL2(sliceID)) {
-        if (headFlash > 0) {
-          Serial.printf("Failed to fetch uncorrutped L2 at slice %" PRIu16 " and we had jumped back at %" PRIu16 ", use slices before jump back\n", sliceID, headFlash);
-          countL2 = headFlash;
-        } else {
-          Serial.printf("Failed to fetch uncorrutped L2 at slice %" PRIu16 ", use slices before it\n", sliceID);
-          countL2 = sliceID;
-        }
-        headL2 = 0;
-        return;
-      }
-      unixThis = sliceL2.unixOffset + sliceL2.records[0].timestamp;
-      if (unixThis <= unixLast) { /* Jumping back, allowed only once */
-        if (headFlash > 0) { /* Already go back once, not possible */
-          Serial.printf("Flash slice %" PRIu16 " jump back when we already have %" PRIu16 " jump back, impossible, use slices before first jump back\n", sliceID, headFlash);
-          headL2 = 0;
-          countL2 = headFlash;
-          return;
-        }
-        /* First time going back */
-        headFlash = sliceID;
-      } /* else, Most common case, going upward */
-      unixLast = unixThis;
-    }
-    headL2 = headFlash;
-    countL2 = FlashSectCount;
   }
 
   void firstFetchAppend(uint32_t const millisCurrent) {
@@ -387,15 +458,13 @@ struct SensorHistory {
 static SensorHistory history = {};
 
 void httpHandleLast() {
-  static int const lenBuffer = 16;
-
   int i, r, offset, remain;
   int const countArgs = server.args();
   SensorRecord &record = history.last();
-  char buffer[lenBuffer];
+  char buffer[SensorRecord::lenBufferShort];
 
   if (countArgs > 0) {
-    offset = 0, remain = lenBuffer;
+    offset = 0, remain = SensorRecord::lenBufferShort;
     buffer[1] = '\0';
     for (i = 0; i < countArgs; ++i) {
       String const &argName = server.argName(i);
@@ -419,12 +488,12 @@ void httpHandleLast() {
     }
     server.send(200, "text/plain", buffer + 1, offset - 1);
   } else {
-    r = snprintf(buffer, lenBuffer, "%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "", record.tempInt, record.tempDot, record.humidInt, record.humidDot);
+    r = snprintf(buffer, SensorRecord::lenBufferShort, "%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "", record.tempInt, record.tempDot, record.humidInt, record.humidDot);
     if (r < 0) {
       serverSendError(StringFormatFailure);
       return;
     }
-    if (r >= lenBuffer) {
+    if (r >= SensorRecord::lenBufferShort) {
       serverSendError(StringWouldTruncate);
     }
     server.send(200, "text/plain", buffer, r);
@@ -480,8 +549,8 @@ void serverSendHeadersForRaw() {
 #endif
 
 struct RawAllSender {
-  static size_t const lenBuffer = 1024;
-  static size_t const lenMax = lenBuffer - SensorRecord::lenBuffer;
+  COMPCONST size_t const lenBuffer = 1024;
+  COMPCONST size_t const lenMax = lenBuffer - SensorRecord::lenBuffer;
 
   char buffer[lenBuffer];
   size_t len;
@@ -550,13 +619,13 @@ void httpHandleRawAll() {
 
   if (history.countL2 > 0) {
     for (i = history.headL2; i < history.countL2; ++i) {
-      if (!history.fetchToL2(i)) {
+      if (!history.fetchL2(i)) {
         continue;
       }
       sender.sendFullSlice(history.sliceL2);
     }
     for (i = 0; i < history.headL2; ++i) {
-      if (!history.fetchToL2(i)) {
+      if (!history.fetchL2(i)) {
         continue;
       }
       sender.sendFullSlice(history.sliceL2);
@@ -587,18 +656,13 @@ void httpHandleRoot() {
 }
 
 void setup() {
-  static char const HostName[] = PRIVATE_HOSTNAME;
-  static char const WiFiSSID[] = PRIVATE_WIFI_SSID;
-  static char const WiFiPassword[] = PRIVATE_WIFI_PASSWORD;
-  static unsigned long const OneSecondAsMs = 1'000;
-  static unsigned long const BaudRate = 115200;
+  static String const wantedSSID = String(ConfigWiFiSSID);
 
   bool recoverFlash = false;
   int8_t countNetworks, bestScanID;
   uint8_t i, *currentBSSID;
   int32_t bestRSSI, currentRSSI, currentChannel;
   uint32_t millisCurrent;
-  String const wantedSSID = String(WiFiSSID);
   String currentSSID;
 
   pinMode(PcPinPower, OUTPUT);
@@ -606,8 +670,8 @@ void setup() {
   pinMode(PcPinReset, OUTPUT);
   digitalWrite(PcPinReset, LOW);
 
-  Serial.begin(BaudRate);
-  WiFi.setHostname(HostName);
+  Serial.begin(ConfigBaudRate);
+  WiFi.setHostname(ConfigHostName);
   WiFi.setAutoReconnect(true);
 
   for (;;) {
@@ -659,7 +723,7 @@ void setup() {
       continue;
     }
     Serial.printf("Chose %" PRId8 " as target AP\n", bestScanID);
-    WiFi.begin(WiFiSSID, WiFiPassword, WiFi.channel(bestScanID), WiFi.BSSID(bestScanID));
+    WiFi.begin(ConfigWiFiSSID, ConfigWiFiPassword, WiFi.channel(bestScanID), WiFi.BSSID(bestScanID));
     WiFi.scanDelete();
 
     if (!recoverFlash) {
