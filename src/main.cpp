@@ -185,18 +185,19 @@ struct SensorSlice {
   COMPCONST uint32_t const Magic = 0x82660C05;
   COMPCONST uint16_t const MaxRecords = 30;
   COMPCONST uint16_t const MaxRecordsSub1 = MaxRecords - 1;
-  COMPCONST uint16_t const Count32 = (MaxRecords + 1) * 2;
+  COMPCONST uint16_t const CountChecksum32 = (MaxRecords + 1) * 2;
+  COMPCONST uint16_t const CountAll32 = MaxRecords + 2;
 
   uint32_t magic = Magic;
   uint32_t checksum;
   uint64_t unixOffset;
   SensorRecord records[MaxRecords];
 
-  uint32_t actualChecksum() {
+  uint32_t actualChecksum() const {
     uint32_t const *const raw = reinterpret_cast<uint32_t const *>(&unixOffset);
     uint32_t x = *raw;
     uint16_t i;
-    for (i = 1; i < Count32; ++i) {
+    for (i = 1; i < CountChecksum32; ++i) {
       x ^= raw[i];
     }
     return x;
@@ -211,6 +212,21 @@ struct SensorSlice {
       recordID = recordIDNext;
     }
   }
+
+  bool valid() {
+    uint32_t expectedChecksum;
+
+    if (magic != SensorSlice::Magic) {
+      Serial.printf("Slice magic not right (recorded %08" PRIx32 " != expected %08" PRIx32 ")\n", magic, SensorSlice::Magic);
+      return false;
+    }
+    expectedChecksum = actualChecksum();
+    if (checksum != expectedChecksum) {
+      Serial.printf("Slice Checksum mismatch (recorded %08" PRIx32 " != expected %08" PRIx32")\n", checksum, expectedChecksum);
+      return false;
+    }
+    return true;
+  }
 };
 
 struct SensorHistory {
@@ -224,16 +240,19 @@ struct SensorHistory {
   COMPCONST uint16_t const FlashSectSize = 1 << FlashSectExp; /* 4096 */
   COMPCONST uint16_t const FlashSectStart = FlashAddrStart / FlashSectSize;
   COMPCONST uint16_t const FlashSectEnd = FlashAddrEnd / FlashSectSize;
-  COMPCONST uint16_t const FlashSectCount = FlashSectEnd - FlashSectStart;
-  COMPCONST int const FlashSectPageFactor = 4;
+  COMPCONST uint16_t const FlashSectTotal = FlashSectEnd - FlashSectStart;
+  COMPCONST int const FlashPageExp = 8;
+  COMPCONST int const FlashSectPageFactor = FlashSectExp - FlashPageExp;
   COMPCONST uint8_t const FlashSectPageCount = 1 << FlashSectPageFactor;
-  COMPCONST uint16_t const FlashPageSize = 1 << (FlashSectExp - FlashSectPageFactor); /* 256 */
+  COMPCONST uint16_t const FlashSectWordCount = FlashSectSize / sizeof(uint32_t);
+  COMPCONST uint16_t const FlashPageSize = 1 << FlashPageExp; /* 256 */
   static_assert(sizeof(struct SensorSlice) == FlashPageSize, "SensorSlice should have the same size as page");
   COMPCONST uint16_t const FlashPageInSectMask = FlashSectPageCount - 1;
   COMPCONST uint16_t const FlashPageStart = FlashAddrStart / FlashPageSize;
   COMPCONST uint16_t const FlashPageEnd = FlashAddrEnd / FlashPageSize;
-  COMPCONST uint16_t const FlashPageCount = FlashPageEnd - FlashPageStart;
-  COMPCONST uint16_t const FlashPageCountSubSect = FlashPageCount - FlashSectPageCount;
+  COMPCONST uint16_t const FlashPageTotal = FlashPageEnd - FlashPageStart;
+  COMPCONST uint16_t const FlashPageTotalSubSect = FlashPageTotal - FlashSectPageCount;
+  COMPCONST uint8_t const FlashPageWordCount = FlashPageSize / sizeof(uint32_t);
 
   union {
     SensorSlice sliceL1 = {.magic = SensorSlice::Magic};
@@ -272,7 +291,7 @@ struct SensorHistory {
     uint16_t const flashSectorID = sectorID + FlashSectStart;
     SpiFlashOpResult opResult;
 
-    Serial.printf("Erasing sector %" PRIu16 " /f%" PRIu16 "\n", sectorID, flashSectorID);
+    Serial.printf("Erasing sector %" PRIu16 "/f%" PRIu16 "\n", sectorID, flashSectorID);
     opResult = spi_flash_erase_sector(flashSectorID);
     if (opResult != SPI_FLASH_RESULT_OK) {
       Serial.printf("Failed to erase sector %" PRIu16 "/f%" PRIu16 ", op result %d\n", sectorID, flashSectorID, opResult);
@@ -285,10 +304,10 @@ struct SensorHistory {
     uint16_t const flashPageID = pageID + FlashPageStart;
     SpiFlashOpResult opResult;
 
-    Serial.printf("Writing L1 to page %" PRIu16 " /f%" PRIu16 "\n", pageID, flashPageID);
+    Serial.printf("Writing L1 to page %" PRIu16 "/f%" PRIu16 "\n", pageID, flashPageID);
     opResult = spi_flash_write(flashPageID * FlashPageSize, sliceL1Raw, FlashPageSize);
     if (opResult != SPI_FLASH_RESULT_OK) {
-      Serial.printf("Failed to write L1 to page %" PRIu16 " /f%" PRIu16 ", op result %d\n", pageID, flashPageID, opResult);
+      Serial.printf("Failed to write L1 to page %" PRIu16 "/f%" PRIu16 ", op result %d\n", pageID, flashPageID, opResult);
       return false;
     }
     return true;
@@ -301,16 +320,16 @@ struct SensorHistory {
   }
 
   void flushL1L2() {
-    uint16_t const pageID = ((headL2 << FlashSectPageFactor) + countL2) % FlashPageCount;
+    uint16_t const pageID = ((headL2 << FlashSectPageFactor) + countL2) % FlashPageTotal;
     bool const afterBoundary = pageID & FlashPageInSectMask;
 
     Serial.printf("Flushing L1 to L2 flash page %" PRIu16 "\n", pageID);
 
     if (!afterBoundary) {
       /* Whether we successfully erase the sector or not, consider pages on it bad */
-      if (countL2 > FlashPageCountSubSect) { /* Technically this could only be countL2 == FlashPageCount, but do this securely */
-        headL2 = (headL2 + 1) % FlashSectCount;
-        countL2 = FlashPageCountSubSect;
+      if (countL2 > FlashPageTotalSubSect) { /* Technically this could only be countL2 == FlashPageTotal, but do this securely */
+        headL2 = (headL2 + 1) % FlashSectTotal;
+        countL2 = FlashPageTotalSubSect;
       }
       if (!erase(pageID >> FlashSectPageFactor)) {
         fallbackShift();
@@ -327,9 +346,20 @@ struct SensorHistory {
     ++countL2;
   }
 
+  bool erasedL2() {
+    uint16_t wordID;
+
+    for (wordID = 0; wordID < SensorSlice::CountAll32; ++ wordID) {
+      if (sliceL2Raw[wordID] != UINT32_MAX) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+
   bool fetchL2(uint16_t const pageID) {
     uint16_t const flashPageID = pageID + FlashPageStart;
-    uint32_t checksum;
     SpiFlashOpResult opResult;
 
     opResult = spi_flash_read(flashPageID * FlashPageSize, sliceL2Raw, FlashPageSize);
@@ -338,66 +368,113 @@ struct SensorHistory {
       Serial.printf("fetch %" PRIu16 "/f%" PRIu16 ": Read not OK, op result %d\n", pageID, flashPageID, opResult);
       return false;
     }
-    if (sliceL2.magic != SensorSlice::Magic) {
-      Serial.printf("fetch %" PRIu16 "/f%" PRIu16 ": Magic not right (recorded %08" PRIx32 " != expected %08" PRIx32 ")\n", pageID, flashPageID, sliceL2.magic, SensorSlice::Magic);
-      return false;
-    }
-    checksum = sliceL2.actualChecksum();
-    if (checksum != sliceL2.checksum) {
-      Serial.printf("fetch %" PRIu16 "/f%" PRIu16 ": Checksum mismatch, expected %016" PRIx16 ", found %016" PRIx16  "\n", pageID, flashPageID, checksum, sliceL2.checksum);
-      return false;
-    }
-    return true;
+    return sliceL2.valid();
   }
 
   void recoverFlash() {
-    uint16_t pageID, sectorID = 0;
-    uint64_t unixLast = 0, unixThis, unixFirst = 0;
-    bool first = true;
+    uint16_t sectorID, flashSectorID, sectorPageID, flashPageID, badPageCount = 0, firstPageCount = 0, secondSectHead = 0;
+    uint64_t unixLast = 0, unixLastSector = 0, unixThis, unixFirst = 0;
+    SpiFlashOpResult opResult;
+    bool first = true, seenEmptyPage;
 
-    /* recover slices */
     Serial.println("Recovering on-flash records...");
-    for (pageID = 0; pageID < FlashPageCount; ++pageID) {
-      if (!fetchL2(pageID)) {
-        if (sectorID > 0) {
-          Serial.printf("Failed to fetch uncorrutped L2 at page %" PRIu16 " and we had jumped back at sector %" PRIu16 ", use pages before jump back\n", pageID, sectorID);
-          countL2 = sectorID << FlashSectPageFactor;
-        } else {
-          Serial.printf("Failed to fetch uncorrutped L2 at page %" PRIu16 ", use pages before it\n", pageID);
-          countL2 = pageID;
-        }
-        headL2 = 0;
-        return;
-      }
-      unixThis = sliceL2.unixOffset + sliceL2.records[0].timestamp;
-      if (first) {
-        unixFirst = unixThis;
-        first = false;
-      }
-      if (unixThis <= unixLast) { /* Jumping back, allowed only once */
-        if (sectorID > 0) { /* Already go back once, not possible */
-          Serial.printf("Flash page %" PRIu16 " jump back when we already have sector %" PRIu16 " jump back, impossible, use pages before first jump back\n", pageID, sectorID);
+    for (
+      sectorID = 0,
+      flashSectorID = FlashSectStart;
+
+      sectorID < FlashSectEnd;
+
+      ++sectorID,
+      ++flashSectorID
+    ) {
+      for (
+        sectorPageID = 0,
+        flashPageID = flashSectorID << FlashSectPageFactor,
+        seenEmptyPage = false;
+
+        sectorPageID < FlashSectPageCount;
+
+        ++sectorPageID,
+        ++flashPageID
+      ) {
+        opResult = spi_flash_read(flashPageID << FlashPageExp, sliceL2Raw, FlashPageSize);
+        if (opResult != SPI_FLASH_RESULT_OK) {
+          Serial.printf("Failed to read sector %" PRIu16 "/f%" PRIu16 " page %" PRIu16 "/f%" PRIu16 " when recovering, using good pages before it\n", sectorID, flashSectorID, sectorPageID, flashPageID);
           headL2 = 0;
-          countL2 = sectorID << FlashSectPageFactor;
-          return;
-        } else if (pageID & FlashPageInSectMask) {
-          Serial.printf("Flash page %" PRIu16 " jump back inside sector, impossible, use pages before it\n", pageID);
-          headL2 = 0;
-          countL2 = pageID;
+          countL2 = firstPageCount;
           return;
         }
-        /* First time jumping back */
-        sectorID = pageID >> FlashSectPageFactor;
-      } /* else, Most common case, going upward */
-      unixLast = unixThis;
+        if (erasedL2()) { /* Empty page */
+          if (secondSectHead > 0) {
+            Serial.printf("Page %" PRIu16 " in sector %" PRIu16 "/f%" PRIu16 " is empty, when we expect second head; use only the first half of ring\n", sectorPageID, sectorID, flashSectorID);
+            headL2 = 0;
+            countL2 = firstPageCount;
+            return;
+          }
+          seenEmptyPage = true;
+          continue;
+        }
+        if (seenEmptyPage || !sliceL2.valid()) {
+          if (seenEmptyPage) {
+            Serial.println("Non-empty page after empty page in same sector");
+          }
+          Serial.printf("Page %" PRIu16 " in sector %" PRIu16 "/f%" PRIu16 " is bad; ", sectorPageID, sectorID, flashSectorID);
+          if (secondSectHead > 0) {
+            Serial.printf("and we were expecting second half of ring after either alike sector or empty sector, using sectors before %" PRIu16 "\n", secondSectHead);
+            headL2 = 0;
+            countL2 = firstPageCount;
+            return;
+          } else {
+            Serial.println("consider this sector bad and expect next sector to be head of second part of ring");
+            firstPageCount = sectorID << FlashSectPageFactor;
+            secondSectHead = sectorID + 1;
+            unixLast = unixLastSector;
+            badPageCount += FlashSectPageCount;
+            break;
+          }
+        }
+        unixThis = sliceL2.unixOffset + sliceL2.records[0].timestamp;
+        if (first) { /* avoid bool(uint64_t) which needs software emulation */
+          unixFirst = unixThis;
+          first = false;
+        }
+        if (unixThis <= unixLast) { /* Jumping back, allowed only once, and only for the first page in sector */
+          if (secondSectHead > 0) { /* Already go back once, not allowed */
+            Serial.printf("Flash page %" PRIu16 " in sector %" PRIu16 "/f%" PRIu16 " jump back when we already expects second half sectors head at sector %" PRIu16 ", use pages before it\n", sectorPageID, sectorID, flashSectorID, secondSectHead);
+            headL2 = 0;
+            countL2 = firstPageCount;
+            return;
+          } else if (sectorPageID > 0) { /* not the first page, not allowed */
+            Serial.printf("Flash page %" PRIu16 " in sector %" PRIu16 "/f%" PRIu16 " jump back but it's not the first page, consider this sector bad, expect next sector to be head of second\n", sectorPageID, sectorID, flashSectorID);
+            firstPageCount = sectorID << FlashSectPageFactor;
+            secondSectHead = sectorID + 1;
+            unixLast = unixLastSector;
+            badPageCount += FlashSectPageCount;
+            break;
+          } else { /* jumping back at first page, first time */
+            firstPageCount = sectorID << FlashSectPageFactor;
+            secondSectHead = sectorID;
+          }
+        } else if (!secondSectHead) {
+          ++firstPageCount;
+        }
+        unixLast = unixThis;
+      }
+      /* The above logic should guarantee when seenEmptyPage == true, secondSecHead == false, but do a check anyway */
+      if (seenEmptyPage && !secondSectHead) {
+        secondSectHead = sectorID + 1;
+      }
+      if (sectorPageID == FlashSectPageCount) {
+        unixLastSector = unixLast;
+      }
     }
-    if (sectorID > 0 && unixFirst <= unixLast) {
-      Serial.printf("Flash jumped back at sector %" PRIu16 " yet the first unix offset %" PRIu64 " is not larger than last offset %" PRIu64 ", use pages before jumping back\n", sectorID, unixFirst, unixLast);
+    if (secondSectHead > 0 && unixFirst <= unixLast) {
+      Serial.printf("Flash jumped back at sector %" PRIu16 " yet the first unix offset %" PRIu64 " is not larger than last offset %" PRIu64 ", use pages before jumping back\n", secondSectHead, unixFirst, unixLast);
       headL2 = 0;
-      countL2 = sectorID << FlashSectPageFactor;
+      countL2 = firstPageCount;
     } else {
-      headL2 = sectorID;
-      countL2 = FlashPageCount;
+      headL2 = secondSectHead;
+      countL2 = FlashPageTotal - badPageCount;
     }
   }
 
