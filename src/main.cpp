@@ -112,6 +112,7 @@ struct NtpSyncer {
   bool init, isIP;
 
   uint64_t unixOffset = MinUnixOffset;
+  uint64_t unixLast = MinUnixOffset;
 
   static uint32_t BEu32At(byte const *const data) {
     return (uint32_t(data[0]) << 24) |
@@ -142,7 +143,7 @@ struct NtpSyncer {
   void update(uint32_t millisCurrent) {
     uint8_t i;
     uint32_t ntpOffset, requestSecs, requestFrac;
-    uint64_t candidateUnixOffset;
+    uint64_t candidateUnixNow;
     int packetSize;
 
     if (!init) {
@@ -220,23 +221,46 @@ struct NtpSyncer {
     millisCurrent = upTimer.currentMillis();
     ntpOffset = BEu32At(buffer + OffsetSecs);
 
-    candidateUnixOffset = ntpOffset - NtpUnixOffset;
+    candidateUnixNow = ntpOffset - NtpUnixOffset;
     if (ntpOffset < MinNtp) {
       Serial.printf("NTP offset %" PRIu32 " < minimum NTP %" PRIu32 ", adding one era\n", ntpOffset, MinNtp);
-      candidateUnixOffset += 0x100000000ULL;
+      candidateUnixNow += 0x100000000ULL;
     }
-    candidateUnixOffset -= upTimer.upSeconds(millisCurrent);
-    if (candidateUnixOffset < unixOffset) {
-      Serial.printf("Ignoring backward unix offset %" PRIu64 " < current %" PRIu64 "\n", candidateUnixOffset, unixOffset);
+    if (candidateUnixNow < unixLast) {
+      Serial.printf("Ignoring backward unix time %" PRIu64 " < current %" PRIu64 "\n", candidateUnixNow, unixLast);
     } else {
-      unixOffset = candidateUnixOffset;
+      unixOffset = candidateUnixNow - upTimer.upSeconds(millisCurrent);
+      unixLast = candidateUnixNow;
     }
     millisLast = millisCurrent;
-    Serial.printf("Current unix offset is %" PRIu64 "\n", unixOffset);
+    Serial.printf("Current unix time is %" PRIu64 ", unix offset is %" PRIu64 "\n", unixLast, unixOffset);
   }
 
   void firstUpdate(uint32_t const millisCurrent) {
     update(millisCurrent);
+  }
+
+  void observeUnixSeconds(uint64_t const unixSeconds) {
+    if (unixSeconds > unixLast) {
+      unixLast = unixSeconds;
+    }
+  }
+
+  uint64_t currentUnixSeconds(uint32_t const millisCurrent) {
+    uint64_t const unixSeconds = unixOffset + upTimer.upSeconds(millisCurrent);
+
+    observeUnixSeconds(unixSeconds);
+    return unixSeconds;
+  }
+
+  void ensureUnixSeconds(uint32_t const millisCurrent, uint64_t const unixSeconds) {
+    uint64_t const candidateUnixOffset = unixSeconds - upTimer.upSeconds(millisCurrent);
+
+    if (candidateUnixOffset > unixOffset) {
+      Serial.printf("Raising unix offset to recovered floor %" PRIu64 "\n", candidateUnixOffset);
+      unixOffset = candidateUnixOffset;
+    }
+    observeUnixSeconds(unixSeconds);
   }
 
   void maybeUpdate(uint32_t const millisCurrent) {
@@ -662,7 +686,7 @@ struct SensorHistory {
     value = valuesL0 + current;
 
     millisLast = millisCurrent;
-    unixSeconds = ntpSyncer.unixOffset + upTimer.upSeconds(millisCurrent);
+    unixSeconds = ntpSyncer.currentUnixSeconds(millisCurrent);
     unixSecondsL0[current] = unixSeconds;
     value->humidInt = dht.data[0];
     value->humidDot = dht.data[1];
@@ -671,6 +695,9 @@ struct SensorHistory {
   }
 
   void firstFetchAppend(uint32_t const millisCurrent) {
+    if (countL2 > 0 && fetchPage(slicePage(countL2 - 1))) {
+      ntpSyncer.ensureUnixSeconds(millisCurrent, sliceL2.unixOffset + sliceL2.records[SensorSlice::MaxRecordsSub1].timestamp);
+    }
     dht.begin();
     fetchAppend(millisCurrent);
   }
@@ -986,7 +1013,7 @@ void setup() {
     delay(OneSecondAsMs);
   }
 
-  millisCurrent = millis();
+  millisCurrent = upTimer.currentMillis();
   ntpSyncer.firstUpdate(millisCurrent);
   history.firstFetchAppend(millisCurrent);
 
