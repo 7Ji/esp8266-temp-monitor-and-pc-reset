@@ -983,9 +983,7 @@ void setup() {
     if (!recoverFlash) {
       /* This might be slow so do it before waiting for online */
       history.recoverFlash();
-      if (history.countL2 > 0) {
-        Serial.printf("Recovered %" PRIu16 " slices from flash, head is %" PRIu16 "\n", history.countL2, history.headL2);
-      }
+      Serial.printf("Recovered %" PRIu16 " slices from flash, head is %" PRIu16 "\n", history.countL2, history.headL2);
       recoverFlash = true;
     }
     for (i = 0; i < MaxWaits; ++i) {
