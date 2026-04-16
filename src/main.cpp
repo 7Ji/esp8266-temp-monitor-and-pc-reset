@@ -457,19 +457,13 @@ struct SensorHistory {
     uint64_t diff64;
     SensorRecord recordL1 = {.value = valueL0};
 
-    while (countL1 > 0) {
+    if (countL1 > 0) {
+      /* Unlikely to happen, but just in case */
       diff64 = unixSeconds - sliceL1.unixOffset;
-      if (diff64 <= UINT16_MAX) {
-        break;
-      }
-
-      Serial.printf("Rebasing L1 to fit 16-bit timestamp delta %" PRIu64 "\n", diff64);
-      if (countL1 == 1) {
+      if (diff64 > UINT16_MAX) {
+        Serial.printf("Dropping partial L1 with too-wide timestamp delta %" PRIu64 "\n", diff64);
         countL1 = 0;
-        break;
       }
-      sliceL1.shift();
-      --countL1;
     }
 
     if (countL1 == 0) {
