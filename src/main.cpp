@@ -556,8 +556,10 @@ struct SensorHistory {
             unixLast = unixLastSector;
             break;
           } else { /* jumping back at first page, first time */
-            firstPageCount = sectorID << FlashSectPageFactor;
-            secondSectHead = sectorID;
+            if (!secondSectHead) {
+              firstPageCount = sectorID << FlashSectPageFactor;
+              secondSectHead = sectorID;
+            }
           }
         } else if (!secondSectHead) {
           ++firstPageCount;
