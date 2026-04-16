@@ -298,8 +298,16 @@ struct SensorHistory {
   uint8_t headL0 = 0;
   uint8_t countL0 = 0;
 
+  uint16_t firstPage() const {
+    return headL2 << FlashSectPageFactor;
+  }
+
+  uint16_t slicePage(uint16_t const sliceID) const {
+    return (firstPage() + sliceID) % FlashPageTotal;
+  }
+
   SensorRecord &first() {
-    if (countL2 > 0 && fetchL2(headL2)) {
+    if (countL2 > 0 && fetchPage(firstPage())) {
       return sliceL2.records[0];
     } else if (countL1 > 0) {
       return sliceL1.records[0];
@@ -345,7 +353,7 @@ struct SensorHistory {
   }
 
   void flushL1L2() {
-    uint16_t const pageID = ((headL2 << FlashSectPageFactor) + countL2) % FlashPageTotal;
+    uint16_t const pageID = slicePage(countL2);
     bool const afterBoundary = pageID & FlashPageInSectMask;
 
     Serial.printf("Flushing L1 to L2 flash page %" PRIu16 "\n", pageID);
@@ -382,22 +390,24 @@ struct SensorHistory {
     return true;
   }
 
-
-  bool fetchL2(uint16_t const pageID) {
-    uint16_t const flashPageID = pageID + FlashPageStart;
+  bool fetchFlashPage(uint16_t const flashPageID) {
     SpiFlashOpResult opResult;
 
     opResult = spi_flash_read(flashPageID * FlashPageSize, sliceL2Raw, FlashPageSize);
 
     if (opResult != SPI_FLASH_RESULT_OK) {
-      Serial.printf("fetch %" PRIu16 "/f%" PRIu16 ": Read not OK, op result %d\n", pageID, flashPageID, opResult);
+      Serial.printf("fetch f%" PRIu16 ": Read not OK, op result %d\n", flashPageID, opResult);
       return false;
     }
     return sliceL2.valid();
   }
 
+  bool fetchPage(uint16_t const pageID) {
+    return fetchFlashPage(pageID + FlashPageStart);
+  }
+
   void recoverFlash() {
-    uint16_t sectorID, flashSectorID, sectorPageID, flashPageID, badPageCount = 0, firstPageCount = 0, secondSectHead = 0;
+    uint16_t sectorID, flashSectorID, sectorPageID, flashPageID, pageCount = 0, firstPageCount = 0, secondSectHead = 0;
     uint64_t unixLast = 0, unixLastSector = 0, unixThis, unixFirst = 0;
     SpiFlashOpResult opResult;
     bool first = true, seenEmptyPage;
@@ -407,7 +417,7 @@ struct SensorHistory {
       sectorID = 0,
       flashSectorID = FlashSectStart;
 
-      sectorID < FlashSectEnd;
+      sectorID < FlashSectTotal;
 
       ++sectorID,
       ++flashSectorID
@@ -454,7 +464,6 @@ struct SensorHistory {
             firstPageCount = sectorID << FlashSectPageFactor;
             secondSectHead = sectorID + 1;
             unixLast = unixLastSector;
-            badPageCount += FlashSectPageCount;
             break;
           }
         }
@@ -464,7 +473,8 @@ struct SensorHistory {
           first = false;
         }
         if (unixThis <= unixLast) { /* Jumping back, allowed only once, and only for the first page in sector */
-          if (secondSectHead > 0) { /* Already go back once, not allowed */
+          if (secondSectHead > 0 && (sectorID != secondSectHead || sectorPageID > 0)) {
+            /* After a partial/bad sector, a jump back is only valid at the expected second head. */
             Serial.printf("Flash page %" PRIu16 " in sector %" PRIu16 "/f%" PRIu16 " jump back when we already expects second half sectors head at sector %" PRIu16 ", use pages before it\n", sectorPageID, sectorID, flashSectorID, secondSectHead);
             headL2 = 0;
             countL2 = firstPageCount;
@@ -474,7 +484,6 @@ struct SensorHistory {
             firstPageCount = sectorID << FlashSectPageFactor;
             secondSectHead = sectorID + 1;
             unixLast = unixLastSector;
-            badPageCount += FlashSectPageCount;
             break;
           } else { /* jumping back at first page, first time */
             firstPageCount = sectorID << FlashSectPageFactor;
@@ -483,6 +492,7 @@ struct SensorHistory {
         } else if (!secondSectHead) {
           ++firstPageCount;
         }
+        ++pageCount;
         unixLast = unixThis;
       }
       /* The above logic should guarantee when seenEmptyPage == true, secondSecHead == false, but do a check anyway */
@@ -499,7 +509,7 @@ struct SensorHistory {
       countL2 = firstPageCount;
     } else {
       headL2 = secondSectHead;
-      countL2 = FlashPageTotal - badPageCount;
+      countL2 = pageCount;
     }
   }
 
@@ -695,6 +705,41 @@ struct RawAllSender {
     }
   }
 
+  void sendPage(uint16_t const pageID) {
+    if (!history.fetchPage(pageID)) {
+      return;
+    }
+    sendFullSlice(history.sliceL2);
+  }
+
+  void sendAll() {
+    uint16_t i;
+
+    if (history.countL2 > 0) {
+      offset = history.firstPage();
+      if (offset > 0) {
+        for (i = offset; i < SensorHistory::FlashPageTotal; ++i) {
+          sendPage(i);
+        }
+        offset = history.countL2 + offset - SensorHistory::FlashPageTotal;
+        for (i = 0; i < offset; ++i) {
+          sendPage(i);
+        }
+      } else {
+        for (i = 0; i < history.countL2; ++i) {
+          sendPage(i);
+        }
+      }
+    }
+    if (history.countL1 > 0) {
+      sendPartialSlice(history.sliceL1, history.countL1);
+    }
+    if (history.countL0 > 0) {
+      sendRingRecords(history.recordsL0, history.headL0, history.countL0);
+    }
+
+  }
+
   ~RawAllSender() {
     if (offset) {
       server.sendContent(buffer, offset);
@@ -704,30 +749,9 @@ struct RawAllSender {
 };
 
 void httpHandleRawAll() {
-  uint16_t i;
-
   RawAllSender sender = {};
 
-  if (history.countL2 > 0) {
-    for (i = history.headL2; i < history.countL2; ++i) {
-      if (!history.fetchL2(i)) {
-        continue;
-      }
-      sender.sendFullSlice(history.sliceL2);
-    }
-    for (i = 0; i < history.headL2; ++i) {
-      if (!history.fetchL2(i)) {
-        continue;
-      }
-      sender.sendFullSlice(history.sliceL2);
-    }
-  }
-  if (history.countL1 > 0) {
-    sender.sendPartialSlice(history.sliceL1, history.countL1);
-  }
-  if (history.countL0 > 0) {
-    sender.sendRingRecords(history.recordsL0, history.headL0, history.countL0);
-  }
+  sender.sendAll();
 }
 
 void httpHandleRawLast() {
