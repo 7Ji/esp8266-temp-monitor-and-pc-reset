@@ -98,12 +98,12 @@ Current routes:
 
 - `/`: embedded dashboard with current readings and history graphs
 - `/last`: latest reading as plain text, intended to be used by scripts, format `temp,humidity`
-- `/last?temp`: only the latest temperature
-- `/last?humid`: only the latest humidity
-- `/raw/last`: latest reading as `timestamp,temp,humidity`
-- `/raw/all`: full available history, one sample per line as `timestamp,temp,humidity`
-- `/pc/power`: authenticated `POST`, sends a short pulse on `PRIVATE_PIN_POWER`; requires header `Authorization: Bearer <PRIVATE_PC_AUTH>` and reply with `404` when unauthorized (to hide the route)
-- `/pc/reset`: authenticated `POST`, sends a short pulse on `PRIVATE_PIN_RESET`; requires header `Authorization: Bearer <PRIVATE_PC_AUTH>` and reply with `404` when unauthorized (to hide the route)
+- `/temp`: only the latest temperature
+- `/humid`: only the latest humidity
+- `/raw`: latest reading as `timestamp,temp,humidity`
+- `/history`: full available history, one sample per line as `timestamp,temp,humidity`
+- `/power`: authenticated `POST`, sends a short pulse on `PRIVATE_PIN_POWER`; requires header `Authorization: Bearer <PRIVATE_PC_AUTH>` and reply with `404` when unauthorized (to hide the route)
+- `/reset`: authenticated `POST`, sends a short pulse on `PRIVATE_PIN_RESET`; requires header `Authorization: Bearer <PRIVATE_PC_AUTH>` and reply with `404` when unauthorized (to hide the route)
 
 ## PC Control Wiring
 
@@ -144,13 +144,13 @@ ESP GND ------------------- pin 2    pin 3 -------- RESET_SW GND
 For power on / off:
 
 ```sh
-curl --request POST --url http://[ip-or-host-name]/pc/power --header 'Authorization: Bearer [your key]'
+curl --request POST --url http://[ip-or-host-name]/power --header 'Authorization: Bearer [your key]'
 ```
 
 For reset:
 
 ```sh
-curl --request POST --url http://[ip-or-host-name]/pc/reset --header 'Authorization: Bearer [your key]'
+curl --request POST --url http://[ip-or-host-name]/reset --header 'Authorization: Bearer [your key]'
 ```
 
 ## License

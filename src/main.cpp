@@ -274,8 +274,9 @@ struct NtpSyncer {
 static NtpSyncer ntpSyncer = {};
 
 struct SensorValue {
-  COMPCONST int const lenBuffer = 38; /* extreme 18446744073709551615,255.255,255.255\n */
-  COMPCONST int const lenBufferShort = 16; /* extreme 255.255,255.255\0 */
+  COMPCONST int const lenBufferTempOrHumid = 8; /* extreme 255.255\0 */
+  COMPCONST int const lenBufferTempAndHumid = lenBufferTempOrHumid * 2; /* extreme 255.255,255.255\0 */
+  COMPCONST int const lenBuffer = lenBufferTempAndHumid + 22; /* extreme 18446744073709551615,255.255,255.255\n\0 */
 
   int8_t tempInt;
   uint8_t tempDot;
@@ -706,46 +707,54 @@ struct SensorHistory {
 static SensorHistory history = {};
 
 void httpHandleLast() {
-  int i, r, offset, remain;
-  int const countArgs = server.args();
   SensorValue &value = history.last();
-  char buffer[SensorValue::lenBufferShort];
+  char buffer[SensorValue::lenBufferTempAndHumid];
+  int r;
 
-  if (countArgs > 0) {
-    offset = 0, remain = SensorValue::lenBufferShort;
-    buffer[1] = '\0';
-    for (i = 0; i < countArgs; ++i) {
-      String const &argName = server.argName(i);
-      if (argName.startsWith("temp")) {
-        r = snprintf(buffer + offset, remain, ",%" PRId8 ".%" PRIu8, value.tempInt, value.tempDot);
-      } else if (argName.startsWith("humid")) {
-        r = snprintf(buffer + offset, remain, ",%" PRIu8 ".%" PRIu8, value.humidInt, value.humidDot);
-      } else {
-        continue;
-      }
-      if (r < 0) {
-        serverSendError(StringFormatFailure);
-        return;
-      }
-      if (r >= remain) {
-        serverSendError(StringWouldTruncate);
-        return;
-      }
-      offset += r;
-      remain -= r;
-    }
-    server.send(200, "text/plain", buffer + 1, offset - 1);
-  } else {
-    r = snprintf(buffer, SensorValue::lenBufferShort, "%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "", value.tempInt, value.tempDot, value.humidInt, value.humidDot);
-    if (r < 0) {
-      serverSendError(StringFormatFailure);
-      return;
-    }
-    if (r >= SensorValue::lenBufferShort) {
-      serverSendError(StringWouldTruncate);
-    }
-    server.send(200, "text/plain", buffer, r);
+  r = snprintf(buffer, SensorValue::lenBufferTempAndHumid, "%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "", value.tempInt, value.tempDot, value.humidInt, value.humidDot);
+  if (r < 0) {
+    serverSendError(StringFormatFailure);
+    return;
   }
+  if (r >= SensorValue::lenBufferTempAndHumid) {
+    serverSendError(StringWouldTruncate);
+    return;
+  }
+  server.send(200, "text/plain", buffer, r);
+}
+
+void httpHandleTemp() {
+  SensorValue &value = history.last();
+  char buffer[SensorValue::lenBufferTempOrHumid];
+  int r;
+
+  r = snprintf(buffer, SensorValue::lenBufferTempOrHumid, "%" PRId8 ".%" PRIu8 "", value.tempInt, value.tempDot);
+  if (r < 0) {
+    serverSendError(StringFormatFailure);
+    return;
+  }
+  if (r >= SensorValue::lenBufferTempOrHumid) {
+    serverSendError(StringWouldTruncate);
+    return;
+  }
+  server.send(200, "text/plain", buffer, r);
+}
+
+void httpHandleHumid() {
+  SensorValue &value = history.last();
+  char buffer[SensorValue::lenBufferTempOrHumid];
+  int r;
+
+  r = snprintf(buffer, SensorValue::lenBufferTempOrHumid, "%" PRIu8 ".%" PRIu8 "", value.humidInt, value.humidDot);
+  if (r < 0) {
+    serverSendError(StringFormatFailure);
+    return;
+  }
+  if (r >= SensorValue::lenBufferTempOrHumid) {
+    serverSendError(StringWouldTruncate);
+    return;
+  }
+  server.send(200, "text/plain", buffer, r);
 }
 
 void httpHandleNotFound() {
@@ -769,7 +778,7 @@ void pulseButton(uint8_t const pin) {
   digitalWrite(pin, LOW);
 }
 
-void httpHandlePcPower() {
+void httpHandlePower() {
   if (!serverIsAuthorized()) {
     httpHandleNotFound();
     return;
@@ -779,7 +788,7 @@ void httpHandlePcPower() {
   server.send_P(200, "text/plain", PcPowerOk, sizeof(PcPowerOk) - 1);
 }
 
-void httpHandlePcReset() {
+void httpHandleReset() {
   if (!serverIsAuthorized()) {
     httpHandleNotFound();
     return;
@@ -886,13 +895,13 @@ struct RawAllSender {
   }
 };
 
-void httpHandleRawAll() {
+void httpHandleHistory() {
   RawAllSender sender = {};
 
   sender.sendAll();
 }
 
-void httpHandleRawLast() {
+void httpHandleRaw() {
   char buffer[SensorValue::lenBuffer];
   uint64_t unixSeconds;
   size_t len;
@@ -1011,10 +1020,12 @@ void setup() {
 
   server.on("/", HTTP_GET, httpHandleRoot);
   server.on("/last", HTTP_GET, httpHandleLast);
-  server.on("/pc/power", HTTP_POST, httpHandlePcPower);
-  server.on("/pc/reset", HTTP_POST, httpHandlePcReset);
-  server.on("/raw/last", HTTP_GET, httpHandleRawLast);
-  server.on("/raw/all", HTTP_GET, httpHandleRawAll);
+  server.on("/temp", HTTP_GET, httpHandleTemp);
+  server.on("/humid", HTTP_GET, httpHandleHumid);
+  server.on("/power", HTTP_POST, httpHandlePower);
+  server.on("/reset", HTTP_POST, httpHandleReset);
+  server.on("/raw", HTTP_GET, httpHandleRaw);
+  server.on("/history", HTTP_GET, httpHandleHistory);
   server.onNotFound(httpHandleNotFound);
   server.begin();
 

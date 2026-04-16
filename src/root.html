@@ -689,7 +689,7 @@
     }
 
     async function refreshCurrent() {
-      const entries = parseRows(await fetchText('/raw/last'));
+      const entries = parseRows(await fetchText('/raw'));
       if (entries.length === 0) {
         throw new Error('No current data');
       }
@@ -705,7 +705,7 @@
     }
 
     async function refreshHistory() {
-      historyEntries = parseRows(await fetchText('/raw/all'));
+      historyEntries = parseRows(await fetchText('/history'));
       if (historyEntries.length > 0) {
         const entry = historyEntries[historyEntries.length - 1];
         document.getElementById('temperature').textContent = entry.temperature.toFixed(1);
