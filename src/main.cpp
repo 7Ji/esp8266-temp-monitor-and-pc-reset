@@ -640,6 +640,7 @@ struct SensorHistory {
       }
       /* The above logic should guarantee when seenEmptyPage == true, secondSecHead == false, but do a check anyway */
       if (seenEmptyPage && !secondSectHead) {
+        Serial.printf("Empty pages were seen in sector %" PRIu16 "/f%" PRIu16 ", expecting next sector to be head\n", sectorID, flashSectorID);
         secondSectHead = sectorID + 1;
       }
       if (sectorPageID == FlashSectPageCount) {
