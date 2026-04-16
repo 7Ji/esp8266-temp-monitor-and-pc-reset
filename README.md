@@ -86,7 +86,7 @@ value[4]
   0x3       humidDot   (u8)
 ```
 
-The page is exactly 256 bytes, matching the ESP8266 flash page write size. `timestamp` is the per-record second offset from the slice `unixOffset`, with the first record in each slice always stored as offset `0`. `L0` keeps only `SensorValue` entries plus the parallel absolute Unix timestamp array; `SensorRecord` is used by `L1` and `L2` where compact per-slice offsets are useful.
+The page is exactly 256 bytes, matching the ESP8266 flash page write size. `timestamp` is the per-record second offset from the slice `unixOffset`, with the first record in each slice always stored as offset `0`. `L0` keeps only `SensorValue` entries plus the parallel absolute Unix timestamp array; `SensorRecord` is used by `L1` and `L2` where compact per-slice offsets are useful. `checksum` is CRC32 over `unixOffset` and the full records array.
 
 On boot, recovery scans the whole `L2` flash range page-by-page. Empty pages are treated as erased space. Valid pages are ordered by the slice `unixOffset`, which acts as the page's implicit monotonic identifier. In this firmware that is a practical ordering key because each page is written about every 42.7 minutes and `unixOffset` is not allowed to move backwards. Because the ring wraps only at sector boundaries, recovery allows one time jump backwards at the first page of a sector and treats that sector as the current head. If a bad page, partially erased sector, or non-empty page after an empty page is found, recovery conservatively keeps the known-good history before that point and expects the next sector to be the second half of the ring.
 

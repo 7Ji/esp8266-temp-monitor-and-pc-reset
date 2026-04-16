@@ -321,13 +321,7 @@ struct SensorSlice {
   SensorRecord records[MaxRecords];
 
   uint32_t actualChecksum() const {
-    uint32_t const *const raw = reinterpret_cast<uint32_t const *>(&unixOffset);
-    uint32_t x = *raw;
-    uint16_t i;
-    for (i = 1; i < CountChecksum32; ++i) {
-      x ^= raw[i];
-    }
-    return x;
+    return crc32(&unixOffset, sizeof(unixOffset) + sizeof(records));
   }
 
   void shift() {
