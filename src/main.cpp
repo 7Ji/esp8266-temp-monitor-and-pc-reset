@@ -55,7 +55,9 @@ struct UpTimer {
   uint32_t millisOffset = 0;
   uint32_t millisLast = 0;
 
-  void tick(uint32_t const millisCurrent) {
+  uint32_t currentMillis() {
+    uint32_t const millisCurrent = millis();
+
     if (millisCurrent < millisLast) { /* overflow */
       /* UINT32_MAX = 0xFFFFFFFF = 4294967295 */
       secondsOffset += 4294967;
@@ -65,6 +67,8 @@ struct UpTimer {
         secondsOffset += 1;
       }
     }
+    millisLast = millisCurrent;
+    return millisCurrent;
   }
 
   uint32_t upSeconds(uint32_t const millisCurrent) const {
@@ -79,6 +83,11 @@ struct NtpSyncer {
   COMPCONST uint32_t const NtpUnixOffset = 2208988800UL;
   COMPCONST uint32_t const MinUnixOffset = 1776133834UL; /* Tue Apr 14 11:00:01 CST 2026, no specific reason */
   COMPCONST uint32_t const MinNtp = NtpUnixOffset + MinUnixOffset;
+  COMPCONST size_t const BufferSize = 48;
+  COMPCONST uint16_t const NtpPortRemote = 123;
+  COMPCONST uint8_t const OffsetSecs = 40;
+  COMPCONST uint8_t const OffsetFrac = 44;
+  COMPCONST byte const NtpMagic = 0b11100011;
 
   COMPCONST char NtpServer[] =
 #ifdef PRIVATE_NTP_SERVER
@@ -87,7 +96,7 @@ struct NtpSyncer {
     "pool.ntp.org"
 #endif
       ;
-  COMPCONST uint16_t const UdpPortNtp =
+  COMPCONST uint16_t const NtpPortLocal =
 #ifdef PRIVATE_NTP_LOCAL_PORT
     PRIVATE_NTP_LOCAL_PORT
 #else
@@ -97,19 +106,48 @@ struct NtpSyncer {
 
   IPAddress serverIP;
   WiFiUDP udp;
-  byte buffer[48];
+  byte buffer[BufferSize];
   uint32_t millisLast;
+  uint32_t requestToken = 0;
   bool init, isIP;
 
   uint64_t unixOffset = MinUnixOffset;
 
-  void update(uint32_t const millisCurrent) {
+  static uint32_t BEu32At(byte const *const data) {
+    return (uint32_t(data[0]) << 24) |
+           (uint32_t(data[1]) << 16) |
+           (uint32_t(data[2]) << 8) |
+            uint32_t(data[3]);
+  }
+
+  static void BEu32To(byte *const data, uint32_t const value) {
+    data[0] = value >> 24;
+    data[1] = value >> 16;
+    data[2] = value >> 8;
+    data[3] = value;
+  }
+
+  void discard(size_t size) {
+    int discarded;
+
+    while (size > 0) {
+      discarded = udp.read(buffer, size > BufferSize ? BufferSize : size);
+      if (discarded <= 0 || size_t(discarded) >= size) {
+        return;
+      }
+      size -= discarded;
+    }
+  }
+
+  void update(uint32_t millisCurrent) {
     uint8_t i;
-    uint32_t ntpOffset, naiveUnixOffset;
+    uint32_t ntpOffset, requestSecs, requestFrac;
+    uint64_t candidateUnixOffset;
+    int packetSize;
 
     if (!init) {
-      if (!udp.begin(UdpPortNtp)) {
-        Serial.printf("Failed to listen on %" PRIu16 "\n", UdpPortNtp);
+      if (!udp.begin(NtpPortLocal)) {
+        Serial.printf("Failed to listen on %" PRIu16 "\n", NtpPortLocal);
         return;
       }
       if (serverIP.fromString(NtpServer)) {
@@ -123,13 +161,21 @@ struct NtpSyncer {
         return;
       }
     }
-    if (!udp.beginPacket(serverIP, 123)) {
+    /* discard pending packets */
+    while ((packetSize = udp.parsePacket()) > 0) {
+      discard(packetSize);
+    }
+    if (!udp.beginPacket(serverIP, NtpPortRemote)) {
       Serial.println("Failed to begin NTP packet");
       return;
     }
-    buffer[0] = 0b11100011;
-    memset(buffer + 1, 0, sizeof(buffer) - 1);
-    if (udp.write(buffer, sizeof(buffer)) != sizeof(buffer)) {
+    buffer[0] = NtpMagic;
+    memset(buffer + 1, 0, BufferSize - 1);
+    requestSecs = ++requestToken;
+    requestFrac = millisCurrent;
+    BEu32To(buffer + OffsetSecs, requestSecs);
+    BEu32To(buffer + OffsetFrac, requestFrac);
+    if (udp.write(buffer, BufferSize) != BufferSize) {
       Serial.println("Failed to write whole NTP packet");
       return;
     }
@@ -138,7 +184,31 @@ struct NtpSyncer {
       return;
     }
     for (i = 0;;) {
-      if (udp.parsePacket()) {
+      packetSize = udp.parsePacket();
+      if (packetSize > 0) {
+        if (size_t(packetSize) < BufferSize) {
+          Serial.printf("Ignoring short NTP response of %d bytes\n", packetSize);
+          discard(packetSize);
+          continue;
+        }
+        if (udp.read(buffer, BufferSize) != BufferSize) {
+          Serial.println("Failed to read NTP response");
+          if (size_t(packetSize) > BufferSize) {
+            discard(packetSize - BufferSize);
+          }
+          return;
+        }
+        if (size_t(packetSize) > BufferSize) {
+          discard(packetSize - BufferSize);
+        }
+        if (udp.remotePort() != NtpPortRemote || udp.remoteIP() != serverIP) {
+          Serial.println("Ignoring NTP response from unexpected peer");
+          continue;
+        }
+        if (BEu32At(buffer + 24) != requestSecs || BEu32At(buffer + 28) != requestFrac) {
+          Serial.println("Ignoring stale NTP response");
+          continue;
+        }
         break;
       }
       delay(100);
@@ -147,20 +217,20 @@ struct NtpSyncer {
         return;
       }
     }
-    if (udp.read(buffer, sizeof buffer) != sizeof buffer) {
-      Serial.println("Failed to read NTP response");
-      return;
-    }
-    ntpOffset = ((uint32_t(word(buffer[40], buffer[41])) << 16) | word(buffer[42], buffer[43]));
+    millisCurrent = upTimer.currentMillis();
+    ntpOffset = BEu32At(buffer + OffsetSecs);
 
-    naiveUnixOffset = ntpOffset - NtpUnixOffset;
+    candidateUnixOffset = ntpOffset - NtpUnixOffset;
     if (ntpOffset < MinNtp) {
       Serial.printf("NTP offset %" PRIu32 " < minimum NTP %" PRIu32 ", adding one era\n", ntpOffset, MinNtp);
-      unixOffset = 0x100000000ULL + naiveUnixOffset;
-    } else {
-      unixOffset = naiveUnixOffset;
+      candidateUnixOffset += 0x100000000ULL;
     }
-    unixOffset -= upTimer.upSeconds(millisCurrent);
+    candidateUnixOffset -= upTimer.upSeconds(millisCurrent);
+    if (candidateUnixOffset < unixOffset) {
+      Serial.printf("Ignoring backward unix offset %" PRIu64 " < current %" PRIu64 "\n", candidateUnixOffset, unixOffset);
+    } else {
+      unixOffset = candidateUnixOffset;
+    }
     millisLast = millisCurrent;
     Serial.printf("Current unix offset is %" PRIu64 "\n", unixOffset);
   }
@@ -888,8 +958,7 @@ void loop() {
   uint32_t millisCurrent;
 
   server.handleClient();
-  millisCurrent = millis();
-  upTimer.tick(millisCurrent);
+  millisCurrent = upTimer.currentMillis();
   ntpSyncer.maybeUpdate(millisCurrent);
   history.maybeFetchAppend(millisCurrent);
 }
