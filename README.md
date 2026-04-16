@@ -51,6 +51,16 @@ To open the serial monitor:
 platformio device monitor
 ```
 
+## Test
+
+Host-side recovery tests can be run without flashing the board:
+
+```bash
+platformio test -e native
+```
+
+This native test target exercises the flash recovery algorithm with synthetic flash layouts, so common recovery cases can be checked on a desktop machine before running on the ESP8266.
+
 ## Data Persistence
 
 The hostname, WiFi SSID, WiFi password, pins and auth token are hardcoded in firmware once built and flashed. Sensor history uses a layered buffer so recent data stays detailed while older data is decimated and persisted to flash.
