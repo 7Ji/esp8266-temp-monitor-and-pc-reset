@@ -249,19 +249,18 @@ struct NtpSyncer {
 
 static NtpSyncer ntpSyncer = {};
 
-struct SensorRecord {
+struct SensorValue {
   COMPCONST int const lenBuffer = 38; /* extreme 18446744073709551615,255.255,255.255\n */
   COMPCONST int const lenBufferShort = 16; /* extreme 255.255,255.255\0 */
 
-  uint32_t timestamp; /* second */
   int8_t tempInt;
   uint8_t tempDot;
   uint8_t humidInt;
   uint8_t humidDot;
 
   /* buffer should be at least lenBuffer */
-  bool intoStr(uint64_t const unixOffset, char *const buffer, size_t &len) const {
-    int const r = snprintf(buffer, lenBuffer, "%" PRIu64 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", unixOffset + timestamp, tempInt, tempDot, humidInt, humidDot);
+  bool intoStr(uint64_t const unixSeconds, char *const buffer, size_t &len) const {
+    int const r = snprintf(buffer, lenBuffer, "%" PRIu64 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", unixSeconds, tempInt, tempDot, humidInt, humidDot);
 
     if (r < 0) {
       serverSendError(StringFormatFailure);
@@ -276,14 +275,21 @@ struct SensorRecord {
   }
 };
 
-static_assert(sizeof(struct SensorRecord) == 8, "SensorRecord should have a size of 4");
+static_assert(sizeof(struct SensorValue) == 4, "SensorValue should have a size of 4");
+
+struct SensorRecord {
+  uint16_t timestamp; /* second offset from slice unixOffset */
+  SensorValue value;
+};
+
+static_assert(sizeof(struct SensorRecord) == 6, "SensorRecord should have a size of 6");
 
 struct SensorSlice {
   COMPCONST uint32_t const Magic = 0x82660C05;
-  COMPCONST uint16_t const MaxRecords = 30;
+  COMPCONST uint16_t const MaxRecords = 40;
   COMPCONST uint16_t const MaxRecordsSub1 = MaxRecords - 1;
-  COMPCONST uint16_t const CountChecksum32 = (MaxRecords + 1) * 2;
-  COMPCONST uint16_t const CountAll32 = MaxRecords + 2;
+  COMPCONST uint16_t const CountChecksum32 = (sizeof(uint64_t) + MaxRecords * sizeof(SensorRecord)) / sizeof(uint32_t);
+  COMPCONST uint16_t const CountAll32 = CountChecksum32 + 2;
 
   uint32_t magic = Magic;
   uint32_t checksum;
@@ -301,11 +307,15 @@ struct SensorSlice {
   }
 
   void shift() {
-    uint16_t recordID, recordIDNext;
+    uint16_t recordID, recordIDNext, diff;
+
+    diff = records[1].timestamp;
+    unixOffset += diff;
 
     for (recordID = 0; recordID < MaxRecordsSub1;) {
       recordIDNext = recordID + 1;
       records[recordID] = records[recordIDNext];
+      records[recordID].timestamp -= diff;
       recordID = recordIDNext;
     }
   }
@@ -360,7 +370,8 @@ struct SensorHistory {
     SensorSlice sliceL2; /* about minutely, flush to flash every 30 minutes */
     uint32_t sliceL2Raw[sizeof(SensorSlice) / sizeof(uint32_t)];
   };
-  SensorRecord recordsL0[MaxHistoryL0];
+  SensorValue valuesL0[MaxHistoryL0];
+  uint64_t unixSecondsL0[MaxHistoryL0];
   uint32_t millisLast = 0;
   uint16_t countL2 = 0; /* page */
   uint16_t headL2 = 0; /* sector */
@@ -376,18 +387,38 @@ struct SensorHistory {
     return (firstPage() + sliceID) % FlashPageTotal;
   }
 
-  SensorRecord &first() {
+  SensorValue &first() {
     if (countL2 > 0 && fetchPage(firstPage())) {
-      return sliceL2.records[0];
+      return sliceL2.records[0].value;
     } else if (countL1 > 0) {
-      return sliceL1.records[0];
+      return sliceL1.records[0].value;
     } else {
-      return recordsL0[headL0];
+      return valuesL0[headL0];
     }
   }
 
-  SensorRecord &last() {
-    return recordsL0[(headL0 + countL0 - 1) & RingMaskL0];
+  SensorValue &first(uint64_t &unixSeconds) {
+    if (countL2 > 0 && fetchPage(firstPage())) {
+      unixSeconds = sliceL2.unixOffset + sliceL2.records[0].timestamp;
+      return sliceL2.records[0].value;
+    } else if (countL1 > 0) {
+      unixSeconds = sliceL1.unixOffset + sliceL1.records[0].timestamp;
+      return sliceL1.records[0].value;
+    } else {
+      unixSeconds = unixSecondsL0[headL0];
+      return valuesL0[headL0];
+    }
+  }
+
+  SensorValue &last() {
+    return valuesL0[(headL0 + countL0 - 1) & RingMaskL0];
+  }
+
+  SensorValue &last(uint64_t &unixSeconds) {
+    uint8_t const recordID = (headL0 + countL0 - 1) & RingMaskL0;
+
+    unixSeconds = unixSecondsL0[recordID];
+    return valuesL0[recordID];
   }
 
   bool erase(uint16_t const sectorID) {
@@ -422,6 +453,34 @@ struct SensorHistory {
     countL1 = SensorSlice::MaxRecordsSub1;
   }
 
+  void appendL1(SensorValue const &valueL0, uint64_t const unixSeconds) {
+    uint64_t diff64;
+    SensorRecord recordL1 = {.value = valueL0};
+
+    while (countL1 > 0) {
+      diff64 = unixSeconds - sliceL1.unixOffset;
+      if (diff64 <= UINT16_MAX) {
+        break;
+      }
+
+      Serial.printf("Rebasing L1 to fit 16-bit timestamp delta %" PRIu64 "\n", diff64);
+      if (countL1 == 1) {
+        countL1 = 0;
+        break;
+      }
+      sliceL1.shift();
+      --countL1;
+    }
+
+    if (countL1 == 0) {
+      sliceL1.unixOffset = unixSeconds;
+      recordL1.timestamp = 0;
+    } else {
+      recordL1.timestamp = unixSeconds - sliceL1.unixOffset;
+    }
+    sliceL1.records[countL1++] = recordL1;
+  }
+
   void flushL1L2() {
     uint16_t const pageID = slicePage(countL2);
     bool const afterBoundary = pageID & FlashPageInSectMask;
@@ -439,7 +498,6 @@ struct SensorHistory {
         return;
       }
     }
-    sliceL1.unixOffset = ntpSyncer.unixOffset;
     sliceL1.checksum = sliceL1.actualChecksum();
     if (!writeL1(pageID)) {
       fallbackShift();
@@ -537,7 +595,7 @@ struct SensorHistory {
             break;
           }
         }
-        unixThis = sliceL2.unixOffset + sliceL2.records[0].timestamp;
+        unixThis = sliceL2.unixOffset;
         if (first) { /* avoid bool(uint64_t) which needs software emulation */
           unixFirst = unixThis;
           first = false;
@@ -586,8 +644,9 @@ struct SensorHistory {
   }
 
   void fetchAppend(uint32_t const millisCurrent) {
-    struct SensorRecord * record;
+    struct SensorValue * value;
     uint16_t current;
+    uint64_t unixSeconds;
 
     if (!dht.read(true)) {
       return;
@@ -598,7 +657,7 @@ struct SensorHistory {
         if (countL1 == SensorSlice::MaxRecords) {
           flushL1L2();
         }
-        sliceL1.records[countL1++] = recordsL0[0];
+        appendL1(valuesL0[0], unixSecondsL0[0]);
       }
       current = headL0;
       headL0 = (headL0 + 1) & RingMaskL0;
@@ -606,14 +665,15 @@ struct SensorHistory {
       current = (headL0 + countL0++) & RingMaskL0;
     }
 
-    record = recordsL0 + current;
+    value = valuesL0 + current;
 
     millisLast = millisCurrent;
-    record->timestamp = upTimer.upSeconds(millisCurrent);
-    record->humidInt = dht.data[0];
-    record->humidDot = dht.data[1];
-    record->tempInt =  static_cast<int8_t>(dht.data[2]);
-    record->tempDot = dht.data[3];
+    unixSeconds = ntpSyncer.unixOffset + upTimer.upSeconds(millisCurrent);
+    unixSecondsL0[current] = unixSeconds;
+    value->humidInt = dht.data[0];
+    value->humidDot = dht.data[1];
+    value->tempInt =  static_cast<int8_t>(dht.data[2]);
+    value->tempDot = dht.data[3];
   }
 
   void firstFetchAppend(uint32_t const millisCurrent) {
@@ -633,18 +693,18 @@ static SensorHistory history = {};
 void httpHandleLast() {
   int i, r, offset, remain;
   int const countArgs = server.args();
-  SensorRecord &record = history.last();
-  char buffer[SensorRecord::lenBufferShort];
+  SensorValue &value = history.last();
+  char buffer[SensorValue::lenBufferShort];
 
   if (countArgs > 0) {
-    offset = 0, remain = SensorRecord::lenBufferShort;
+    offset = 0, remain = SensorValue::lenBufferShort;
     buffer[1] = '\0';
     for (i = 0; i < countArgs; ++i) {
       String const &argName = server.argName(i);
       if (argName.startsWith("temp")) {
-        r = snprintf(buffer + offset, remain, ",%" PRId8 ".%" PRIu8, record.tempInt, record.tempDot);
+        r = snprintf(buffer + offset, remain, ",%" PRId8 ".%" PRIu8, value.tempInt, value.tempDot);
       } else if (argName.startsWith("humid")) {
-        r = snprintf(buffer + offset, remain, ",%" PRIu8 ".%" PRIu8, record.humidInt, record.humidDot);
+        r = snprintf(buffer + offset, remain, ",%" PRIu8 ".%" PRIu8, value.humidInt, value.humidDot);
       } else {
         continue;
       }
@@ -661,12 +721,12 @@ void httpHandleLast() {
     }
     server.send(200, "text/plain", buffer + 1, offset - 1);
   } else {
-    r = snprintf(buffer, SensorRecord::lenBufferShort, "%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "", record.tempInt, record.tempDot, record.humidInt, record.humidDot);
+    r = snprintf(buffer, SensorValue::lenBufferShort, "%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "", value.tempInt, value.tempDot, value.humidInt, value.humidDot);
     if (r < 0) {
       serverSendError(StringFormatFailure);
       return;
     }
-    if (r >= SensorRecord::lenBufferShort) {
+    if (r >= SensorValue::lenBufferShort) {
       serverSendError(StringWouldTruncate);
     }
     server.send(200, "text/plain", buffer, r);
@@ -723,7 +783,7 @@ void serverSendHeadersForRaw() {
 
 struct RawAllSender {
   COMPCONST size_t const lenBuffer = 1024;
-  COMPCONST size_t const lenMax = lenBuffer - SensorRecord::lenBuffer;
+  COMPCONST size_t const lenMax = lenBuffer - SensorValue::lenBuffer;
 
   char buffer[lenBuffer];
   size_t len;
@@ -737,8 +797,8 @@ struct RawAllSender {
     server.send(200, "text/plain", "", 0);
   }
 
-  void sendRecord(uint64_t const unixOffset, SensorRecord const &record) {
-    if (record.intoStr(unixOffset, buffer + offset, len)) {
+  void sendValue(uint64_t const unixSeconds, SensorValue const &value) {
+    if (value.intoStr(unixSeconds, buffer + offset, len)) {
       if ((offset += len) >= lenMax) {
         server.sendContent(buffer, offset);
         offset = 0;
@@ -746,34 +806,25 @@ struct RawAllSender {
     }
   }
 
-  void sendRingRecords(SensorRecord const *records, uint8_t const head, uint8_t const count) {
-    uint64_t const unixOffset = ntpSyncer.unixOffset;
+  void sendRingRecords(SensorValue const *values, uint64_t const *unixSeconds, uint8_t const head, uint8_t const count) {
     uint8_t i;
 
     for (i = head; i < count; ++i) {
-      sendRecord(unixOffset, records[i]);
+      sendValue(unixSeconds[i], values[i]);
     }
     for (i = 0; i < head; ++i) {
-      sendRecord(unixOffset, records[i]);
+      sendValue(unixSeconds[i], values[i]);
     }
   }
 
-  void sendPartialSlice(SensorSlice const &slice, uint16_t const count) {
-    uint64_t const unixOffset = ntpSyncer.unixOffset;
+  void sendSlice(SensorSlice const &slice, uint16_t const count = SensorSlice::MaxRecords) {
+    uint64_t const unixOffset = slice.unixOffset;
+    SensorRecord const *record;
     uint16_t i;
 
     for (i = 0; i < count; ++i) {
-      sendRecord(unixOffset, slice.records[i]);
-    }
-  }
-
-  void sendFullSlice(SensorSlice const &slice) {
-    uint64_t const unixOffset = slice.unixOffset;
-    uint16_t i;
-
-    /* maybe this would use immediate number in instruction, so dont call sendPartialSlice lazily */
-    for (i = 0; i < SensorSlice::MaxRecords; ++i) {
-      sendRecord(unixOffset, slice.records[i]);
+      record = slice.records + i;
+      sendValue(unixOffset + record->timestamp, record->value);
     }
   }
 
@@ -781,7 +832,7 @@ struct RawAllSender {
     if (!history.fetchPage(pageID)) {
       return;
     }
-    sendFullSlice(history.sliceL2);
+    sendSlice(history.sliceL2);
   }
 
   void sendAll() {
@@ -804,10 +855,10 @@ struct RawAllSender {
       }
     }
     if (history.countL1 > 0) {
-      sendPartialSlice(history.sliceL1, history.countL1);
+      sendSlice(history.sliceL1, history.countL1);
     }
     if (history.countL0 > 0) {
-      sendRingRecords(history.recordsL0, history.headL0, history.countL0);
+      sendRingRecords(history.valuesL0, history.unixSecondsL0, history.headL0, history.countL0);
     }
 
   }
@@ -827,10 +878,11 @@ void httpHandleRawAll() {
 }
 
 void httpHandleRawLast() {
-  char buffer[SensorRecord::lenBuffer];
+  char buffer[SensorValue::lenBuffer];
+  uint64_t unixSeconds;
   size_t len;
 
-  if (history.last().intoStr(ntpSyncer.unixOffset, buffer, len)) {
+  if (history.last(unixSeconds).intoStr(unixSeconds, buffer, len)) {
 #ifdef PRIVATE_ALLOW_CROSS
     serverSendHeadersForRaw();
 #endif

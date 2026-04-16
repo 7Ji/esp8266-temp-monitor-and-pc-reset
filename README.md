@@ -55,13 +55,14 @@ platformio device monitor
 
 The hostname, WiFi SSID, WiFi password, pins and auth token are hardcoded in firmware once built and flashed. Sensor history uses a layered buffer so recent data stays detailed while older data is decimated and persisted to flash.
 
-- `L0`: RAM ring, 32 records sampled every 2 seconds, covering about 64 seconds.
-- `L1`: RAM slice, 30 records promoted from `L0` every 32 samples, so one promoted record represents about 64 seconds and one full slice covers about 32 minutes.
+- `L0`: RAM ring, 32 sensor values sampled every 2 seconds, covering about 64 seconds.
+- `L0` also keeps a parallel absolute `unixSeconds` array in RAM so each live sample carries its capture-time Unix timestamp.
+- `L1`: RAM slice, 40 records promoted from `L0` every 32 samples, so one promoted record represents about 64 seconds and one full slice covers about 42.7 minutes.
 - `L2`: flash ring, same 256-byte `SensorSlice` format as `L1`, written one full `L1` slice per flash page.
 
 The `L2` flash area starts at `0x100000` and ends at `0x3FB000`, matching the `eagle.flash.4m.ld` layout that leaves the top flash sectors for EEPROM, RF calibration and WiFi data. This gives `12208` flash pages across `763` sectors. The writer advances at page granularity, but erases at 4 KiB sector granularity. When the ring wraps to the first page of the current head sector, it advances `headL2` by one sector, erases the target sector, writes the first new page, then fills the rest of that sector page-by-page.
 
-After the flash ring is full, retained `L2` capacity ranges from `12193` pages just after a sector rollover to the full `12208` pages just before the next rollover. At the current cadence, the full ring holds `12208 * 30 = 366240` decimated records. Since each retained record represents about 64 seconds, the oldest persisted data is about 271 days old. A sector is erased only when advancing to a new 16-page sector, about every 8.5 hours of samples, and a full cycle across all sectors is also about 271 days, so flash wear is intentionally low.
+After the flash ring is full, retained `L2` capacity ranges from `12193` pages just after a sector rollover to the full `12208` pages just before the next rollover. At the current cadence, the full ring holds `12208 * 40 = 488320` decimated records. Since each retained record represents about 64 seconds, the oldest persisted data is about 362 days old. A sector is erased only when advancing to a new 16-page sector, about every 10.7 hours of samples, and a full cycle across all sectors is also about 362 days, so flash wear is intentionally low.
 
 ## On-Flash Format and Recovery
 
@@ -72,19 +73,22 @@ page[256]
   0x000..0x003  magic        (u32)
   0x004..0x007  checksum     (u32)
   0x008..0x00f  unixOffset   (u64)
-  0x010..0x0ff  records[30]  (30 x 8 bytes)
+  0x010..0x0ff  records[40]  (40 x 6 bytes)
 
-record[8]
-  0x0..0x3  timestamp  (u32)
-  0x4       tempInt    (i8)
-  0x5       tempDot    (u8)
-  0x6       humidInt   (u8)
-  0x7       humidDot   (u8)
+record[6]
+  0x0..0x1  timestamp  (u16)
+  0x2..0x5  value      (SensorValue)
+
+value[4]
+  0x0       tempInt    (i8)
+  0x1       tempDot    (u8)
+  0x2       humidInt   (u8)
+  0x3       humidDot   (u8)
 ```
 
-The page is exactly 256 bytes, matching the ESP8266 flash page write size. `timestamp` is the uptime second when the sample was taken. `unixOffset` is stored per page so exported timestamps are reconstructed as `unixOffset + timestamp`.
+The page is exactly 256 bytes, matching the ESP8266 flash page write size. `timestamp` is the per-record second offset from the slice `unixOffset`, with the first record in each slice always stored as offset `0`. `L0` keeps only `SensorValue` entries plus the parallel absolute Unix timestamp array; `SensorRecord` is used by `L1` and `L2` where compact per-slice offsets are useful.
 
-On boot, recovery scans the whole `L2` flash range page-by-page. Empty pages are treated as erased space. Valid pages are ordered by the reconstructed Unix time of their first record, which acts as the page's implicit monotonic identifier. In this firmware that is a practical ordering key because each page is written about every 32 minutes and `unixOffset` is not allowed to move backwards. Because the ring wraps only at sector boundaries, recovery allows one time jump backwards at the first page of a sector and treats that sector as the current head. If a bad page, partially erased sector, or non-empty page after an empty page is found, recovery conservatively keeps the known-good history before that point and expects the next sector to be the second half of the ring.
+On boot, recovery scans the whole `L2` flash range page-by-page. Empty pages are treated as erased space. Valid pages are ordered by the slice `unixOffset`, which acts as the page's implicit monotonic identifier. In this firmware that is a practical ordering key because each page is written about every 42.7 minutes and `unixOffset` is not allowed to move backwards. Because the ring wraps only at sector boundaries, recovery allows one time jump backwards at the first page of a sector and treats that sector as the current head. If a bad page, partially erased sector, or non-empty page after an empty page is found, recovery conservatively keeps the known-good history before that point and expects the next sector to be the second half of the ring.
 
 ## Web Interface and API
 
