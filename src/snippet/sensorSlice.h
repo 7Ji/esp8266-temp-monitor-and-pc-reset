@@ -67,6 +67,7 @@ struct SensorSlice {
         Serial.printf("Slice record %" PRIu8 " timestamp jump back (%" PRIu16 " <= %" PRIu16 ")", recordID, timestampThis, timestampLast);
         return false;
       }
+      timestampLast = timestampThis;
     }
     return true;
   }

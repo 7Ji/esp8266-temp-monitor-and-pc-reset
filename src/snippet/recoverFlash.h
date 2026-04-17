@@ -146,6 +146,7 @@
     if (unixFirst <= unixLast) {
       Serial.printf("Flash jumped back yet the first unix offset %" PRIu64 " is not larger than last offset %" PRIu64, unixFirst, unixLast);
       recoverOnFailureSecond();
+      return;
     }
     headL2 = sectorStart;
     countL2 += (FlashSectTotal - sectorStart) << FlashSectPageFactor;

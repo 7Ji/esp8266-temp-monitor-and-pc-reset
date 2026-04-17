@@ -26,7 +26,22 @@ COMPCONST SerialMock const Serial;
 
 static uint8_t buffer[FlashAddrEnd];
 
+
+static size_t ReadFailureOffset = SIZE_MAX;
+
+struct ReadFailure {
+  ReadFailure(uint16_t const pageID) {
+    ReadFailureOffset = FlashAddrStart + pageID * FlashPageSize;
+  }
+  ~ReadFailure() {
+    ReadFailureOffset = SIZE_MAX;
+  }
+};
+
 SpiFlashOpResult spi_flash_read(size_t const offset, void *const target, size_t const size) {
+  if (offset == ReadFailureOffset) {
+    return 1;
+  }
   std::memcpy(target, buffer + offset, size);
   return SPI_FLASH_RESULT_OK;
 }
@@ -102,6 +117,8 @@ struct PagePlan {
   uint16_t offset, count;
   bool noMagic = false;
   bool noChecksum = false;
+  bool badFirstTimestamp = false;
+  bool badRecordOrder = false;
   uint64_t unixOffset = 0; /* When not zero, forcing this (and later to use this offset) */
 };
 
@@ -126,6 +143,12 @@ void fillPages(std::vector<PagePlan> const &plans) {
       for (auto j = 0; j < SensorSlice::MaxRecords; ++j) {
         slice->records[j].timestamp = j;
       }
+      if (plan.badFirstTimestamp) {
+        slice->records[0].timestamp = 1;
+      }
+      if (plan.badRecordOrder) {
+        slice->records[SensorSlice::MaxRecordsSub1].timestamp = slice->records[SensorSlice::MaxRecordsSub1 - 1].timestamp;
+      }
       slice->checksum = plan.noChecksum ? 0 : slice->actualChecksum();
       unixOffset += 3600;
     }
@@ -147,6 +170,10 @@ int main() {
   fillPages({{0, 1}});
   history.recoverFlash();
   counter.expect("First page", 1, 0);
+  /* First 15 page */
+  fillPages({{0, 15}});
+  history.recoverFlash();
+  counter.expect("First 15 pages", 15, 0);
   /* First 16 pages */
   fillPages({{0, 16}});
   history.recoverFlash();
@@ -167,6 +194,29 @@ int main() {
   fillPages({{0, 16}, {16, 1, .unixOffset = 1}});
   history.recoverFlash();
   counter.expect("Jump back at second sector head", 16, 0);
+  /* Read failure at second sector head */
+  fillPages({{0, 32}});
+  {
+    auto failure = ReadFailure(16);
+    history.recoverFlash();
+  }
+  counter.expect("Read failure at second sector head", 16, 0);
+  /* Non-empty page after empty page in same sector */
+  fillPages({{0, 16}, {17, 1}});
+  history.recoverFlash();
+  counter.expect("Non-empty page after empty page in same sector", 16, 0);
+  /* Invalid timestamp at second sector head */
+  fillPages({{0, 16}, {16, 1, .badFirstTimestamp = true}});
+  history.recoverFlash();
+  counter.expect("Invalid timestamp at second sector head", 16, 0);
+  /* Record timestamp jump back in second sector head */
+  fillPages({{0, 16}, {16, 1, .badRecordOrder = true}});
+  history.recoverFlash();
+  counter.expect("Record timestamp jump back in second sector head", 16, 0);
+  /* Jump back at second page in second sector */
+  fillPages({{0, 18}, {17, 1, .unixOffset = 1}});
+  history.recoverFlash();
+  counter.expect("Jump back at second page in second sector", 16, 0);
   /* Whole flash */
   fillPages({{0, FlashPageTotal}});
   history.recoverFlash();
@@ -187,6 +237,29 @@ int main() {
   fillPages({{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf}});
   history.recoverFlash();
   counter.expect("Ring from half, whole flash", FlashPageTotal, SectorsFirstHalf);
+  /* Ring from half, second half empty page */
+  fillPages({{0, PagesFirstHalf}});
+  history.recoverFlash();
+  counter.expect("Ring from half, second half empty page", PagesFirstHalf, 0);
+  /* Ring from half, second half no checksum */
+  fillPages({{PagesFirstHalf, PagesSecondHalf, .noChecksum = true}, {0, PagesFirstHalf}});
+  history.recoverFlash();
+  counter.expect("Ring from half, second half no checksum", PagesFirstHalf, 0);
+  /* Ring from half, second half jump back */
+  fillPages({{PagesFirstHalf, PagesSecondHalf - 1}, {0, PagesFirstHalf}, {FlashPageTotal - 1, 1, .unixOffset = 1}});
+  history.recoverFlash();
+  counter.expect("Ring from half, second half jump back", PagesFirstHalf, 0);
+  /* Ring from half, second half read failure */
+  fillPages({{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf}});
+  {
+    auto failure = ReadFailure(PagesFirstHalf + 1);
+    history.recoverFlash();
+  }
+  counter.expect("Ring from half, second half read failure", PagesFirstHalf, 0);
+  /* Ring from half, no wraparound at end */
+  fillPages({{0, PagesFirstHalf}, {PagesFirstHalf, PagesSecondHalf, .unixOffset = 1}});
+  history.recoverFlash();
+  counter.expect("Ring from half, no wraparound at end", PagesFirstHalf, 0);
   /* Ring from half, tail no magic */
   fillPages({{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .noMagic = true}});
   history.recoverFlash();
