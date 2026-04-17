@@ -1,9 +1,9 @@
 struct SensorSlice {
   COMPCONST uint32_t const Magic = 0x82660C05;
-  COMPCONST uint16_t const MaxRecords = 40;
-  COMPCONST uint16_t const MaxRecordsSub1 = MaxRecords - 1;
-  COMPCONST uint16_t const CountChecksum32 = (sizeof(uint64_t) + MaxRecords * sizeof(SensorRecord)) / sizeof(uint32_t);
-  COMPCONST uint16_t const CountAll32 = CountChecksum32 + 2;
+  COMPCONST uint8_t const MaxRecords = 40;
+  COMPCONST uint8_t const MaxRecordsSub1 = MaxRecords - 1;
+  COMPCONST uint8_t const CountChecksum32 = (sizeof(uint64_t) + MaxRecords * sizeof(SensorRecord)) / sizeof(uint32_t);
+  COMPCONST uint8_t const CountAll32 = CountChecksum32 + 2;
 
   uint32_t magic = Magic;
   uint32_t checksum;
@@ -12,7 +12,7 @@ struct SensorSlice {
 
   bool erased() {
     uint32_t const *const raw = reinterpret_cast<uint32_t const *>(this);
-    uint16_t wordID;
+    uint8_t wordID;
 
     for (wordID = 0; wordID < CountAll32; ++ wordID) {
       if (raw[wordID] != UINT32_MAX) {
@@ -27,12 +27,15 @@ struct SensorSlice {
   }
 
   void shift() {
-    uint16_t recordID, recordIDNext, diff;
+    uint8_t recordID, recordIDNext, diff;
+
+    records[0] = records[1];
+    records[0].timestamp = 0;
 
     diff = records[1].timestamp;
     unixOffset += diff;
 
-    for (recordID = 0; recordID < MaxRecordsSub1;) {
+    for (recordID = 1; recordID < MaxRecordsSub1;) {
       recordIDNext = recordID + 1;
       records[recordID] = records[recordIDNext];
       records[recordID].timestamp -= diff;
@@ -42,6 +45,8 @@ struct SensorSlice {
 
   bool valid() {
     uint32_t expectedChecksum;
+    uint16_t timestampLast = 0, timestampThis;
+    uint8_t recordID;
 
     if (magic != SensorSlice::Magic) {
       Serial.printf("Slice magic not right (recorded %08" PRIx32 " != expected %08" PRIx32 ")\n", magic, SensorSlice::Magic);
@@ -51,6 +56,17 @@ struct SensorSlice {
     if (checksum != expectedChecksum) {
       Serial.printf("Slice Checksum mismatch (recorded %08" PRIx32 " != expected %08" PRIx32")\n", checksum, expectedChecksum);
       return false;
+    }
+    if (records[0].timestamp != 0) {
+      Serial.println("Slice first record timestamp is not 0");
+      return false;
+    }
+    for (recordID = 1; recordID < MaxRecords; ++recordID) {
+      timestampThis = records[recordID].timestamp;
+      if (timestampThis <= timestampLast) {
+        Serial.printf("Slice record %" PRIu8 " timestamp jump back (%" PRIu16 " <= %" PRIu16 ")", recordID, timestampThis, timestampLast);
+        return false;
+      }
     }
     return true;
   }
