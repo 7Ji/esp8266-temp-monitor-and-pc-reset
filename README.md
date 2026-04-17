@@ -33,22 +33,28 @@ This project expects a private configuration file before building.
 
 ## Build
 
-With PlatformIO installed:
+With PlatformIO installed, build:
 
-```bash
-platformio run
+```sh
+pio run
+```
+
+To test (algorithm on host):
+
+```sh
+pio test -e native -v
 ```
 
 To upload:
 
-```bash
-platformio run --target upload
+```sh
+pio run --target upload
 ```
 
 To open the serial monitor:
 
-```bash
-platformio device monitor
+```sh
+pio device monitor
 ```
 
 ## Data Persistence
