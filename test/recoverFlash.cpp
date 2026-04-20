@@ -88,8 +88,8 @@ struct PagePlan {
   uint16_t offset, count;
   bool noMagic = false;
   bool noChecksum = false;
-  bool badFirstTimestamp = false;
-  bool badRecordOrder = false;
+  bool nonZeroTimestamp = false;
+  bool lastRecordNotIncreasing = false;
   uint64_t unixOffset = 0; /* When not zero, forcing this (and later to use this offset) */
 };
 
@@ -99,7 +99,7 @@ struct Tester {
   size_t pass = 0;
   size_t total = 0;
 
-  void run(char const *const title, uint16_t const count, uint16_t const head, std::vector<PagePlan> const &plans, std::vector<uint16_t> brokenPages = {}) {
+  void run(char const *const title, uint16_t const head, uint16_t const count, std::vector<PagePlan> const &plans, std::vector<uint16_t> brokenPages = {}) {
     memset(bufferSlices, 0xFF, bufferSlicesSize);
 
     uint64_t unixOffset = 1;
@@ -116,10 +116,10 @@ struct Tester {
         for (auto j = 0; j < SensorSlice::MaxRecords; ++j) {
           slice->records[j].timestamp = j;
         }
-        if (plan.badFirstTimestamp) {
+        if (plan.nonZeroTimestamp) {
           slice->records[0].timestamp = 1;
         }
-        if (plan.badRecordOrder) {
+        if (plan.lastRecordNotIncreasing) {
           slice->records[SensorSlice::MaxRecordsSub1].timestamp = slice->records[SensorSlice::MaxRecordsSub1 - 1].timestamp;
         }
         slice->checksum = plan.noChecksum ? 0 : slice->actualChecksum();
@@ -133,7 +133,7 @@ struct Tester {
     bool const cond = count == history.countL2 && head == history.headL2;
     pass += cond;
     ++total;
-    std::printf("%s%03zu: %-40s: %s\n", cond ? "\033[32m" : "\033[31m", total, title, cond ? "PASS\033[0m" : "FAIL");
+    std::printf("%s%03zu: %s: %s\n", cond ? "\033[32m" : "\033[31m", total, title, cond ? "PASS\033[0m" : "FAIL");
     if (!cond) {
       std::printf(" - countL2 expected %hu got %hu, headL2 expected %hu got %hu\033[0m\n", count, history.countL2, head, history.headL2);
     }
@@ -150,37 +150,47 @@ COMPCONST uint16_t const SectorsFirstHalf = FlashStats::SectTotal / 2;
 COMPCONST uint16_t const PagesFirstHalf = SectorsFirstHalf << FlashStats::SectPageFactor;
 COMPCONST uint16_t const PagesFirstHalfSubSect = PagesFirstHalf - FlashStats::SectPageCount;
 COMPCONST uint16_t const PagesSecondHalf = FlashStats::PageTotal - PagesFirstHalf;
+COMPCONST uint16_t const SectorsMiddle = FlashStats::SectTotal / 3;
+COMPCONST uint16_t const PagesMiddle = SectorsMiddle << FlashStats::SectPageFactor;
+COMPCONST uint16_t const SectorsMiddleLater = SectorsMiddle + 4;
+COMPCONST uint16_t const PagesMiddleLater = SectorsMiddleLater << FlashStats::SectPageFactor;
 
 int main() {
   Tester tester = {};
   tester.run("Empty Flash", 0, 0, {});
-  tester.run("First page", 1, 0, {{0, 1}});
-  tester.run("First 15 pages", 15, 0, {{0, 15}});
-  tester.run("First 16 pages", 16, 0, {{0, 16}});
-  tester.run("First 17 pages", 17, 0, {{0, 17}});
-  tester.run("No magic at second sector head", 16, 0, {{0, 16}, {16, 1, .noMagic = true}});
-  tester.run("No checksum at second sector head", 16, 0, {{0, 16}, {16, 1, .noChecksum = true}});
-  tester.run("Jump back at second sector head", 16, 0, {{0, 16}, {16, 1, .unixOffset = 1}});
-  tester.run("Read failure at second sector head", 16, 0, {{0, 32}}, {16});
-  tester.run("Non-empty page after empty page in same sector", 16, 0, {{0, 16}, {17, 1}});
-  tester.run("Invalid timestamp at second sector head", 16, 0, {{0, 16}, {16, 1, .badFirstTimestamp = true}});
-  tester.run("Record timestamp jump back in second sector head", 16, 0, {{0, 16}, {16, 1, .badRecordOrder = true}});
-  tester.run("Jump back at second page in second sector", 16, 0, {{0, 18}, {17, 1, .unixOffset = 1}});
-  tester.run("Whole Flash", FlashStats::PageTotal, 0, {{0, FlashStats::PageTotal}});
-  tester.run("Whole Flash but last no magic", FlashStats::PageTotalSubSect, 0, {{0, FlashStats::PageTotal - 1}, {FlashStats::PageTotal - 1, 1, .noMagic = true}});
-  tester.run("Whole Flash but last no checksum", FlashStats::PageTotalSubSect, 0, {{0, FlashStats::PageTotal - 1}, {FlashStats::PageTotal - 1, 1, .noChecksum = true}});
-  tester.run("Whole Flash but last jump back", FlashStats::PageTotalSubSect, 0, {{0, FlashStats::PageTotal - 1}, {FlashStats::PageTotal - 1, 1, .unixOffset = 1}});
-  tester.run("Ring from half, whole flash", FlashStats::PageTotal, SectorsFirstHalf, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf}});
-  tester.run("Ring from half, second half empty page", PagesFirstHalf, 0, {{0, PagesFirstHalf}});
-  tester.run("Ring from half, second half no checksum", PagesFirstHalf, 0, {{PagesFirstHalf, PagesSecondHalf, .noChecksum = true}, {0, PagesFirstHalf}});
-  tester.run("Ring from half, second half jump back", PagesFirstHalf, 0, {{PagesFirstHalf, PagesSecondHalf - 1}, {0, PagesFirstHalf}, {FlashStats::PageTotal - 1, 1, .unixOffset = 1}});
-  tester.run("Ring from half, second half read failure", PagesFirstHalf, 0, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf}}, {PagesFirstHalf + 1});
-  tester.run("Ring from half, no wraparound at end", PagesFirstHalf, 0, {{0, PagesFirstHalf}, {PagesFirstHalf, PagesSecondHalf, .unixOffset = 1}});
-  tester.run("Ring from half, tail no magic", FlashStats::PageTotalSubSect, SectorsFirstHalf, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .noMagic = true}});
-  tester.run("Ring from half, tail no checksum", FlashStats::PageTotalSubSect, SectorsFirstHalf, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .noChecksum = true}});
-  tester.run("Ring from half, tail jump back", FlashStats::PageTotalSubSect, SectorsFirstHalf, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .unixOffset = 1}});
-  tester.run("Ring from half, tail first page no magic", FlashStats::PageTotalSubSect, SectorsFirstHalf, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalfSubSect}, {PagesFirstHalfSubSect, 16, .noMagic = true}});
-  tester.run("Ring from half, tail first page no checksum", FlashStats::PageTotalSubSect, SectorsFirstHalf, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalfSubSect}, {PagesFirstHalfSubSect, 16, .noChecksum = true}});
-  tester.run("Ring from half, tail first page jump back (multiple jump back)", PagesFirstHalfSubSect, 0, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalfSubSect}, {PagesFirstHalfSubSect, 16, .unixOffset = 1}});
+  tester.run("First page", 0, 1, {{0, 1}});
+  tester.run("First 15 pages", 0, 15, {{0, 15}});
+  tester.run("First 16 pages", 0, 16, {{0, 16}});
+  tester.run("First 17 pages", 0, 17, {{0, 17}});
+  tester.run("No magic at second sector head", 0, 16, {{0, 16}, {16, 1, .noMagic = true}});
+  tester.run("No checksum at second sector head", 0, 16, {{0, 16}, {16, 1, .noChecksum = true}});
+  tester.run("Jump back at second sector head", 1, 17, {{0, 16}, {16, 17, .unixOffset = 1}});
+  tester.run("Read failure at second sector head", 0, 16, {{0, 32}}, {16});
+  tester.run("Non-empty page after empty page in same sector", 0, 16, {{0, 16}, {17, 1}});
+  tester.run("Invalid timestamp at second sector head", 0, 16, {{0, 16}, {16, 1, .nonZeroTimestamp = true}});
+  tester.run("Last record timestamp not increasing in second sector head", 0, 16, {{0, 16}, {16, 1, .lastRecordNotIncreasing = true}});
+  tester.run("Jump back at second page in second sector", 0, 16, {{0, 18}, {17, 1, .unixOffset = 1}});
+  tester.run("Middle orphan page", SectorsMiddle, 1, {{PagesMiddle, 1}});
+  tester.run("Middle orphan partial sector", SectorsMiddle, 15, {{PagesMiddle, 15}});
+  tester.run("Middle orphan spanning sectors", SectorsMiddle, 17, {{PagesMiddle, 17}});
+  tester.run("Middle orphan beats older head chunk", SectorsMiddle, 17, {{0, 16}, {PagesMiddle, 17}});
+  tester.run("Newer head chunk beats older middle orphan", 0, 16, {{PagesMiddle, 17}, {0, 16}});
+  tester.run("Newer middle orphan beats older middle orphan", SectorsMiddleLater, 16, {{PagesMiddle, 17}, {PagesMiddleLater, 16}});
+  tester.run("Whole Flash", 0, FlashStats::PageTotal, {{0, FlashStats::PageTotal}});
+  tester.run("Whole Flash but last no magic", 0, FlashStats::PageTotalSubSect, {{0, FlashStats::PageTotal - 1}, {FlashStats::PageTotal - 1, 1, .noMagic = true}});
+  tester.run("Whole Flash but last no checksum", 0, FlashStats::PageTotalSubSect, {{0, FlashStats::PageTotal - 1}, {FlashStats::PageTotal - 1, 1, .noChecksum = true}});
+  tester.run("Whole Flash but last jump back", 0, FlashStats::PageTotalSubSect, {{0, FlashStats::PageTotal - 1}, {FlashStats::PageTotal - 1, 1, .unixOffset = 1}});
+  tester.run("Ring from half, whole flash", SectorsFirstHalf, FlashStats::PageTotal, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf}});
+  tester.run("Ring from half, second half empty", SectorsFirstHalf, PagesSecondHalf, {{PagesFirstHalf, PagesSecondHalf}});
+  tester.run("Ring from half, second half no checksum", 0, PagesFirstHalf, {{PagesFirstHalf, PagesSecondHalf, .noChecksum = true}, {0, PagesFirstHalf}});
+  tester.run("Ring from half, second half jump back", 0, PagesFirstHalf, {{PagesFirstHalf, PagesSecondHalf - 1}, {0, PagesFirstHalf}, {FlashStats::PageTotal - 1, 1, .unixOffset = 1}});
+  tester.run("Ring from half, second half read failure", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf}}, {PagesFirstHalf - 1});
+  tester.run("Ring from half, no wraparound at end", PagesFirstHalf > PagesSecondHalf ? 0 : SectorsFirstHalf, std::max(PagesFirstHalf, PagesSecondHalf), {{0, PagesFirstHalf}, {PagesFirstHalf, PagesSecondHalf, .unixOffset = 1}});
+  tester.run("Ring from half, tail no magic", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .noMagic = true}});
+  tester.run("Ring from half, tail no checksum", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .noChecksum = true}});
+  tester.run("Ring from half, tail jump back", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .unixOffset = 1}});
+  tester.run("Ring from half, tail first page no magic", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalfSubSect}, {PagesFirstHalfSubSect, 16, .noMagic = true}});
+  tester.run("Ring from half, tail first page no checksum", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalfSubSect}, {PagesFirstHalfSubSect, 16, .noChecksum = true}});
+  tester.run("Ring from half, tail first page jump back (multiple jump back)", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalfSubSect}, {PagesFirstHalfSubSect, 16, .unixOffset = 1}});
   return tester.sum() > 0;
 }

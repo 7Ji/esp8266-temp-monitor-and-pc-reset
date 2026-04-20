@@ -3,26 +3,36 @@
 #define PRINTER Serial.
 #endif
 /* This is included INSIDE a C++ struct/class body; DO NOT ADD ANY HEADER INCLUSION*/
-  void recoverOnFailureFirst(uint16_t &sectorID, uint16_t &flashSectorID) {
-    PRINTER println(", consider this sector bad and expect next sector to be head of second part of ring");
-    headL2 = 0;
-    countL2 = sectorID << FlashStats::SectPageFactor;
-    ++sectorID;
-    ++flashSectorID;
-  }
+  struct SlicesCandidate {
+    uint64_t clockBegin, clockEnd;
+    uint16_t head, count;
 
-  /* true if the scan shall end, false for continue */
-  bool recoverFlashFirst(uint16_t &sectorID, uint16_t &flashSectorID, uint64_t &unixFirst) {
+    void maybeReplace(SlicesCandidate const &other) {
+      if (other.clockEnd > clockEnd) {
+        *this = other;
+      }
+    }
+
+    void maybeReplaceBeforeSector(SlicesCandidate &other, uint16_t const sectorID) {
+      if (sectorID > other.head && other.clockEnd > clockEnd) {
+        other.count = (sectorID - other.head) << FlashStats::SectPageFactor;
+        *this = other;
+      }
+    }
+  };
+
+  void recoverSlices(SlicesCandidate &best, SlicesCandidate &current, uint16_t &sectorID, uint16_t &flashSectorID) {
     SpiFlashOpResult opResult;
     uint64_t unixThis, unixLast = 0;
     uint16_t sectorPageID, pageID, flashPageID;
     uint8_t emptyCount;
+    current.head = sectorID;
+    current.count = 0;
+    current.clockBegin = 0;
+    current.clockEnd = 0;
 
-    PRINTER println("Recovering first half");
     for (
-      sectorID = 0,
-      flashSectorID = FlashStats::SectStart;
-
+      ;
       sectorID < FlashStats::SectTotal;
 
       ++sectorID,
@@ -42,130 +52,86 @@
       ) {
         opResult = spi_flash_read(flashPageID << FlashStats::PageExp, sliceL2Raw, FlashStats::PageSize);
         if (opResult != SPI_FLASH_RESULT_OK) {
-          PRINTER printf("Failed to read page %" PRIu16 "/f%" PRIu16 " when recovering first part of flash, using good pages before it\n", pageID, flashPageID);
-          headL2 = 0;
-          countL2 = sectorID << FlashStats::SectPageFactor;
-          return true;
+          PRINTER printf("Failed to read page %" PRIu16 "/f%" PRIu16 " when recovering  flash\n", pageID, flashPageID);
+          best.maybeReplaceBeforeSector(current, sectorID++);
+          ++flashSectorID;
+          return;
         }
         if (sliceL2.erased()) { /* Empty page */
           ++emptyCount;
           continue;
         }
         if (emptyCount) { /* Non-empty page after empty */
-          PRINTER printf("Non-empty page %" PRIu16 "/f%" PRIu16 " appears after empty page in same sector", pageID, flashPageID);
-          recoverOnFailureFirst(sectorID, flashSectorID);
-          return false;
+          PRINTER printf("Non-empty page %" PRIu16 "/f%" PRIu16 " appears after empty page in same sector\n", pageID, flashPageID);
+          best.maybeReplaceBeforeSector(current, sectorID++);
+          ++flashSectorID;
+          return;
         }
         if (!sliceL2.valid()) { /* Invalid page */
-          PRINTER printf("Invalid (wrong magic or checksum) page %" PRIu16 "/f%" PRIu16, pageID, flashPageID);
-          recoverOnFailureFirst(sectorID, flashSectorID);
-          return false;
+          PRINTER printf("Invalid page %" PRIu16 "/f%" PRIu16 "\n", pageID, flashPageID);
+          best.maybeReplaceBeforeSector(current, sectorID++);
+          ++flashSectorID;
+          return;
         }
         unixThis = sliceL2.unixOffset;
-        if (!unixFirst) {
-          unixFirst = unixThis;
+        if (!current.clockBegin) {
+          current.clockBegin = unixThis;
         }
         if (unixThis <= unixLast) { /* Jumping back, allowed only once, and only for the first page in sector */
           if (pageID & FlashStats::PageInSectMask) { /* Not first page in sector */
-            PRINTER printf("Page %" PRIu16 "/f%" PRIu16 " jump back and it's not the first page in sector", pageID, flashPageID);
-            recoverOnFailureFirst(sectorID, flashSectorID);
-            return false;
+            PRINTER printf("Page %" PRIu16 "/f%" PRIu16 " jump back and it's not the first page in sector\n", pageID, flashPageID);
+            best.maybeReplaceBeforeSector(current, sectorID++);
+            ++flashSectorID;
+            return;
           } else { /* First page in sector, this is head of second part */
-            PRINTER printf("Page %" PRIu16 "/f%" PRIu16 " jump back and it's the first page in sector, consider this sector as head of second half of ring", pageID, flashPageID);
-            headL2 = 0;
-            countL2 = sectorID << FlashStats::SectPageFactor;
-            return false;
+            PRINTER printf("Page %" PRIu16 "/f%" PRIu16 " jump back and it's the first page in sector, consider this sector as head of next chain of slices\n", pageID, flashPageID);
+            best.maybeReplaceBeforeSector(current, sectorID);
+            return;
           }
         }
         unixLast = unixThis;
       }
+      current.clockEnd = unixLast; /* Only updated per sector */
       if (emptyCount) { /* With empty page in current, next shall be head */
-        headL2 = 0;
-        countL2 = ((sectorID + 1) << FlashStats::SectPageFactor) - emptyCount;
-        return false;
+        current.count = ((sectorID - current.head + 1) << FlashStats::SectPageFactor) - emptyCount;
+        if (current.count) {
+          best.maybeReplace(current);
+        }
+        ++sectorID;
+        ++flashSectorID;
+        return;
       }
     }
-    headL2 = 0;
-    countL2 = FlashStats::PageTotal;
-    return true;
-  }
-
-  void recoverOnFailureSecond() {
-    PRINTER println(", consider second half of ring bad and use only first half of ring");
-  }
-
-  void recoverFlashSecond(uint16_t sectorID, uint16_t flashSectorID, uint64_t unixFirst) {
-    SpiFlashOpResult opResult;
-    uint64_t unixThis, unixLast = 0;
-    uint16_t sectorPageID, pageID, flashPageID;
-    uint16_t const sectorStart = sectorID;
-
-    PRINTER println("Recovering second half");
-    for (
-      ;
-      sectorID < FlashStats::SectTotal;
-
-      ++sectorID,
-      ++flashSectorID
-    ) {
-      for (
-        sectorPageID = 0,
-        pageID = sectorID << FlashStats::SectPageFactor,
-        flashPageID = flashSectorID << FlashStats::SectPageFactor;
-
-        sectorPageID < FlashStats::SectPageCount;
-
-        ++sectorPageID,
-        ++pageID,
-        ++flashPageID
-      ) {
-        opResult = spi_flash_read(flashPageID << FlashStats::PageExp, sliceL2Raw, FlashStats::PageSize);
-        if (opResult != SPI_FLASH_RESULT_OK) {
-          PRINTER printf("Failed to read page %" PRIu16 "/f%" PRIu16 " when recovering second part of flash", pageID, flashPageID);
-          recoverOnFailureSecond();
-          return;
-        }
-        if (sliceL2.erased()) { /* Empty page */
-          PRINTER printf("Empty page %" PRIu16 "/f%" PRIu16, pageID, flashPageID);
-          recoverOnFailureSecond();
-          return;
-        }
-        if (!sliceL2.valid()) { /* Invalid page */
-          PRINTER printf("Invalid (wrong magic or checksum) page %" PRIu16 "/f%" PRIu16, pageID, flashPageID);
-          recoverOnFailureSecond();
-          return;
-        }
-        unixThis = sliceL2.unixOffset;
-        if (!unixFirst) {
-          unixFirst = unixThis;
-        }
-        if (unixThis <= unixLast) { /* Jumping back, not allowed in second half */
-          PRINTER printf("Page %" PRIu16 "/f%" PRIu16 " jump back", pageID, flashPageID);
-          recoverOnFailureSecond();
-          return;
-        }
-        unixLast = unixThis;
-      }
-    }
-    if (unixFirst <= unixLast) {
-      PRINTER printf("Flash jumped back yet the first unix offset %" PRIu64 " is not larger than last offset %" PRIu64, unixFirst, unixLast);
-      recoverOnFailureSecond();
-      return;
-    }
-    headL2 = sectorStart;
-    countL2 += (FlashStats::SectTotal - sectorStart) << FlashStats::SectPageFactor;
+    current.count = (sectorID - current.head) << FlashStats::SectPageFactor;
+    best.maybeReplace(current);
   }
 
   void recoverFlash() {
-    uint16_t sectorID, flashSectorID;
-    uint64_t unixFirst = 0;
+    uint16_t sectorID = 0, flashSectorID = FlashStats::SectStart, countFirst = 0;
+    SlicesCandidate best = {}, last = {};
+    uint64_t clockBeginFirst = 0;
 
     PRINTER println("Recovering on-flash records...");
-    if (recoverFlashFirst(sectorID, flashSectorID, unixFirst)) {
-      return;
+
+    /* The slices at head is special, they could be the tail-wrapped-around part of a ring */
+    recoverSlices(best, last, sectorID, flashSectorID);
+    if (best.count) {
+      countFirst = best.count;
+      clockBeginFirst = best.clockBegin;
     }
-    PRINTER printf("First half has %" PRIu16 " good pages\n", countL2);
-    if (sectorID < FlashStats::SectTotal) {
-      recoverFlashSecond(sectorID, flashSectorID, unixFirst);
+    while (sectorID < FlashStats::SectTotal) {
+      recoverSlices(best, last, sectorID, flashSectorID);
+    }
+    /* Head and tail candidates may be two halves of one wrapped ring */
+    if (!best.head &&
+      last.head &&
+      (last.head << FlashStats::SectPageFactor) + last.count == FlashStats::PageTotal &&
+      clockBeginFirst > last.clockEnd) {
+      PRINTER println("Recovered wrapped ring");
+      headL2 = last.head;
+      countL2 = last.count + countFirst;
+    } else {
+      headL2 = best.head;
+      countL2 = best.count;
     }
   }
