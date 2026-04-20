@@ -21,6 +21,7 @@ COMPCONST char const PcPowerOk[] PROGMEM = "Power button pulse sent";
 COMPCONST char const PcResetOk[] PROGMEM = "Reset button pulse sent";
 
 COMPCONST unsigned long const OneSecondAsMs = 1'000;
+COMPCONST size_t const SharedBufferSize = 4096;
 COMPCONST uint8_t const MaxWaits = 20;
 COMPCONST uint8_t const PcPinPower =
 #ifdef PRIVATE_PIN_POWER
@@ -44,6 +45,9 @@ D4
 #endif
 , DHT11);
 static ESP8266WebServer server(80);
+static byte _sharedBuffer[SharedBufferSize];
+static byte *const sharedBytesBuffer = _sharedBuffer;
+static char *const sharedStrBuffer = reinterpret_cast<char *>(sharedBytesBuffer);
 
 #define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 
@@ -105,7 +109,6 @@ struct NtpSyncer {
 
   IPAddress serverIP;
   WiFiUDP udp;
-  byte buffer[BufferSize];
   uint32_t millisLast;
   uint32_t requestToken = 0;
   bool init, isIP;
@@ -131,7 +134,7 @@ struct NtpSyncer {
     int discarded;
 
     while (size > 0) {
-      discarded = udp.read(buffer, size > BufferSize ? BufferSize : size);
+      discarded = udp.read(sharedBytesBuffer, size > BufferSize ? BufferSize : size);
       if (discarded <= 0 || size_t(discarded) >= size) {
         return;
       }
@@ -169,13 +172,13 @@ struct NtpSyncer {
       Serial.println("Failed to begin NTP packet");
       return;
     }
-    buffer[0] = NtpMagic;
-    memset(buffer + 1, 0, BufferSize - 1);
+    sharedBytesBuffer[0] = NtpMagic;
+    memset(sharedBytesBuffer + 1, 0, BufferSize - 1);
     requestSecs = ++requestToken;
     requestFrac = millisCurrent;
-    BEu32To(buffer + OffsetSecs, requestSecs);
-    BEu32To(buffer + OffsetFrac, requestFrac);
-    if (udp.write(buffer, BufferSize) != BufferSize) {
+    BEu32To(sharedBytesBuffer + OffsetSecs, requestSecs);
+    BEu32To(sharedBytesBuffer + OffsetFrac, requestFrac);
+    if (udp.write(sharedBytesBuffer, BufferSize) != BufferSize) {
       Serial.println("Failed to write whole NTP packet");
       return;
     }
@@ -191,7 +194,7 @@ struct NtpSyncer {
           discard(packetSize);
           continue;
         }
-        if (udp.read(buffer, BufferSize) != BufferSize) {
+        if (udp.read(sharedBytesBuffer, BufferSize) != BufferSize) {
           Serial.println("Failed to read NTP response");
           if (size_t(packetSize) > BufferSize) {
             discard(packetSize - BufferSize);
@@ -205,7 +208,7 @@ struct NtpSyncer {
           Serial.println("Ignoring NTP response from unexpected peer");
           continue;
         }
-        if (BEu32At(buffer + 24) != requestSecs || BEu32At(buffer + 28) != requestFrac) {
+        if (BEu32At(sharedBytesBuffer + 24) != requestSecs || BEu32At(sharedBytesBuffer + 28) != requestFrac) {
           Serial.println("Ignoring stale NTP response");
           continue;
         }
@@ -218,7 +221,7 @@ struct NtpSyncer {
       }
     }
     millisCurrent = upTimer.currentMillis();
-    ntpOffset = BEu32At(buffer + OffsetSecs);
+    ntpOffset = BEu32At(sharedBytesBuffer + OffsetSecs);
 
     candidateUnixNow = ntpOffset - NtpUnixOffset;
     if (ntpOffset < MinNtp) {
@@ -271,6 +274,7 @@ struct NtpSyncer {
 };
 
 static NtpSyncer ntpSyncer = {};
+static_assert(SharedBufferSize >= NtpSyncer::BufferSize, "Shared buffer is smaller than NTP buffer");
 
 struct SensorValue {
   COMPCONST int const lenBufferTempOrHumid = 8; /* extreme 255.255\0 */
@@ -527,10 +531,9 @@ static SensorHistory history = {};
 
 void httpHandleLast() {
   SensorValue &value = history.last();
-  char buffer[SensorValue::lenBufferTempAndHumid];
   int r;
 
-  r = snprintf(buffer, SensorValue::lenBufferTempAndHumid, "%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "", value.tempInt, value.tempDot, value.humidInt, value.humidDot);
+  r = snprintf(sharedStrBuffer, SensorValue::lenBufferTempAndHumid, "%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "", value.tempInt, value.tempDot, value.humidInt, value.humidDot);
   if (r < 0) {
     serverSendError(StringFormatFailure);
     return;
@@ -539,15 +542,14 @@ void httpHandleLast() {
     serverSendError(StringWouldTruncate);
     return;
   }
-  server.send(200, "text/plain", buffer, r);
+  server.send(200, "text/plain", sharedStrBuffer, r);
 }
 
 void httpHandleTemp() {
   SensorValue &value = history.last();
-  char buffer[SensorValue::lenBufferTempOrHumid];
   int r;
 
-  r = snprintf(buffer, SensorValue::lenBufferTempOrHumid, "%" PRId8 ".%" PRIu8 "", value.tempInt, value.tempDot);
+  r = snprintf(sharedStrBuffer, SensorValue::lenBufferTempOrHumid, "%" PRId8 ".%" PRIu8 "", value.tempInt, value.tempDot);
   if (r < 0) {
     serverSendError(StringFormatFailure);
     return;
@@ -556,15 +558,14 @@ void httpHandleTemp() {
     serverSendError(StringWouldTruncate);
     return;
   }
-  server.send(200, "text/plain", buffer, r);
+  server.send(200, "text/plain", sharedStrBuffer, r);
 }
 
 void httpHandleHumid() {
   SensorValue &value = history.last();
-  char buffer[SensorValue::lenBufferTempOrHumid];
   int r;
 
-  r = snprintf(buffer, SensorValue::lenBufferTempOrHumid, "%" PRIu8 ".%" PRIu8 "", value.humidInt, value.humidDot);
+  r = snprintf(sharedStrBuffer, SensorValue::lenBufferTempOrHumid, "%" PRIu8 ".%" PRIu8 "", value.humidInt, value.humidDot);
   if (r < 0) {
     serverSendError(StringFormatFailure);
     return;
@@ -573,7 +574,7 @@ void httpHandleHumid() {
     serverSendError(StringWouldTruncate);
     return;
   }
-  server.send(200, "text/plain", buffer, r);
+  server.send(200, "text/plain", sharedStrBuffer, r);
 }
 
 void httpHandleNotFound() {
@@ -625,10 +626,9 @@ void serverSendHeadersForRaw() {
 #endif
 
 struct RawAllSender {
-  COMPCONST size_t const lenBuffer = 1024;
-  COMPCONST size_t const lenMax = lenBuffer - SensorValue::lenBuffer;
+  COMPCONST size_t const lenBuffer = SharedBufferSize;
+  COMPCONST size_t const lenMax = SharedBufferSize - SensorValue::lenBuffer;
 
-  char buffer[lenBuffer];
   size_t len;
   size_t offset = 0;
 
@@ -641,9 +641,9 @@ struct RawAllSender {
   }
 
   void sendValue(uint64_t const unixSeconds, SensorValue const &value) {
-    if (value.intoStr(unixSeconds, buffer + offset, len)) {
+    if (value.intoStr(unixSeconds, sharedStrBuffer + offset, len)) {
       if ((offset += len) >= lenMax) {
-        server.sendContent(buffer, offset);
+        server.sendContent(sharedStrBuffer, offset);
         offset = 0;
       }
     }
@@ -708,7 +708,7 @@ struct RawAllSender {
 
   ~RawAllSender() {
     if (offset) {
-      server.sendContent(buffer, offset);
+      server.sendContent(sharedStrBuffer, offset);
     }
     server.sendContent("", 0);
   }
@@ -721,15 +721,14 @@ void httpHandleHistory() {
 }
 
 void httpHandleRaw() {
-  char buffer[SensorValue::lenBuffer];
   uint64_t unixSeconds;
   size_t len;
 
-  if (history.last(unixSeconds).intoStr(unixSeconds, buffer, len)) {
+  if (history.last(unixSeconds).intoStr(unixSeconds, sharedStrBuffer, len)) {
 #ifdef PRIVATE_ALLOW_CROSS
     serverSendHeadersForRaw();
 #endif
-    server.send(200, "text/plain", buffer, len);
+    server.send(200, "text/plain", sharedStrBuffer, len);
   }
 }
 
