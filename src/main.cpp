@@ -681,16 +681,16 @@ struct RawAllSender {
   }
 
   void sendAll() {
-    uint16_t i;
+    uint16_t i, pageOffset;
 
     if (history.countL2 > 0) {
-      offset = history.firstPage();
-      if (offset > 0) {
-        for (i = offset; i < SensorHistory::FlashPageTotal; ++i) {
+      pageOffset = history.firstPage();
+      if (pageOffset > 0) {
+        for (i = pageOffset; i < SensorHistory::FlashPageTotal; ++i) {
           sendPage(i);
         }
-        offset = history.countL2 + offset - SensorHistory::FlashPageTotal;
-        for (i = 0; i < offset; ++i) {
+        pageOffset = history.countL2 + pageOffset - SensorHistory::FlashPageTotal;
+        for (i = 0; i < pageOffset; ++i) {
           sendPage(i);
         }
       } else {
