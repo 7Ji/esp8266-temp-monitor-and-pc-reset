@@ -24,14 +24,14 @@ struct SerialMock {
 
 COMPCONST SerialMock const Serial;
 
-static uint8_t buffer[FlashAddrEnd];
+static uint8_t buffer[FlashStats::AddrEnd];
 
 
 static size_t ReadFailureOffset = SIZE_MAX;
 
 struct ReadFailure {
   ReadFailure(uint16_t const pageID) {
-    ReadFailureOffset = FlashAddrStart + pageID * FlashPageSize;
+    ReadFailureOffset = FlashStats::AddrStart + pageID * FlashStats::PageSize;
   }
   ~ReadFailure() {
     ReadFailureOffset = SIZE_MAX;
@@ -123,8 +123,8 @@ struct PagePlan {
 };
 
 void fillPages(std::vector<PagePlan> const &plans) {
-  static void *const bufferSlices = buffer + FlashAddrStart;
-  static uint32_t const bufferSlicesSize = FlashAddrEnd - FlashAddrStart;
+  static void *const bufferSlices = buffer + FlashStats::AddrStart;
+  static uint32_t const bufferSlicesSize = FlashStats::AddrEnd - FlashStats::AddrStart;
   static SensorSlice * const slicesAll = reinterpret_cast<SensorSlice *>(bufferSlices);
 
   memset(bufferSlices, 0xFF, bufferSlicesSize);
@@ -155,10 +155,10 @@ void fillPages(std::vector<PagePlan> const &plans) {
   }
 }
 
-COMPCONST uint16_t const SectorsFirstHalf = FlashSectTotal / 2;
-COMPCONST uint16_t const PagesFirstHalf = SectorsFirstHalf << FlashSectPageFactor;
-COMPCONST uint16_t const PagesFirstHalfSubSect = PagesFirstHalf - FlashSectPageCount;
-COMPCONST uint16_t const PagesSecondHalf = FlashPageTotal - PagesFirstHalf;
+COMPCONST uint16_t const SectorsFirstHalf = FlashStats::SectTotal / 2;
+COMPCONST uint16_t const PagesFirstHalf = SectorsFirstHalf << FlashStats::SectPageFactor;
+COMPCONST uint16_t const PagesFirstHalfSubSect = PagesFirstHalf - FlashStats::SectPageCount;
+COMPCONST uint16_t const PagesSecondHalf = FlashStats::PageTotal - PagesFirstHalf;
 
 int main() {
   Counter counter = {};
@@ -218,25 +218,25 @@ int main() {
   history.recoverFlash();
   counter.expect("Jump back at second page in second sector", 16, 0);
   /* Whole flash */
-  fillPages({{0, FlashPageTotal}});
+  fillPages({{0, FlashStats::PageTotal}});
   history.recoverFlash();
-  counter.expect("Whole Flash", FlashPageTotal, 0);
+  counter.expect("Whole Flash", FlashStats::PageTotal, 0);
   /* Whole flash but last no magic */
-  fillPages({{0, FlashPageTotal - 1}, {FlashPageTotal - 1, 1, .noMagic = true}});
+  fillPages({{0, FlashStats::PageTotal - 1}, {FlashStats::PageTotal - 1, 1, .noMagic = true}});
   history.recoverFlash();
-  counter.expect("Whole Flash but last no magic", FlashPageTotalSubSect, 0);
+  counter.expect("Whole Flash but last no magic", FlashStats::PageTotalSubSect, 0);
   /* Whole flash but last no magic */
-  fillPages({{0, FlashPageTotal - 1}, {FlashPageTotal - 1, 1, .noChecksum = true}});
+  fillPages({{0, FlashStats::PageTotal - 1}, {FlashStats::PageTotal - 1, 1, .noChecksum = true}});
   history.recoverFlash();
-  counter.expect("Whole Flash but last no checksum", FlashPageTotalSubSect, 0);
+  counter.expect("Whole Flash but last no checksum", FlashStats::PageTotalSubSect, 0);
   /* Whole flash but last no magic */
-  fillPages({{0, FlashPageTotal - 1}, {FlashPageTotal - 1, 1, .unixOffset = 1}});
+  fillPages({{0, FlashStats::PageTotal - 1}, {FlashStats::PageTotal - 1, 1, .unixOffset = 1}});
   history.recoverFlash();
-  counter.expect("Whole Flash but last jump back", FlashPageTotalSubSect, 0);
+  counter.expect("Whole Flash but last jump back", FlashStats::PageTotalSubSect, 0);
   /* Ring from half, whole flash */
   fillPages({{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf}});
   history.recoverFlash();
-  counter.expect("Ring from half, whole flash", FlashPageTotal, SectorsFirstHalf);
+  counter.expect("Ring from half, whole flash", FlashStats::PageTotal, SectorsFirstHalf);
   /* Ring from half, second half empty page */
   fillPages({{0, PagesFirstHalf}});
   history.recoverFlash();
@@ -246,7 +246,7 @@ int main() {
   history.recoverFlash();
   counter.expect("Ring from half, second half no checksum", PagesFirstHalf, 0);
   /* Ring from half, second half jump back */
-  fillPages({{PagesFirstHalf, PagesSecondHalf - 1}, {0, PagesFirstHalf}, {FlashPageTotal - 1, 1, .unixOffset = 1}});
+  fillPages({{PagesFirstHalf, PagesSecondHalf - 1}, {0, PagesFirstHalf}, {FlashStats::PageTotal - 1, 1, .unixOffset = 1}});
   history.recoverFlash();
   counter.expect("Ring from half, second half jump back", PagesFirstHalf, 0);
   /* Ring from half, second half read failure */
@@ -263,23 +263,23 @@ int main() {
   /* Ring from half, tail no magic */
   fillPages({{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .noMagic = true}});
   history.recoverFlash();
-  counter.expect("Ring from half, tail no magic", FlashPageTotalSubSect, SectorsFirstHalf);
+  counter.expect("Ring from half, tail no magic", FlashStats::PageTotalSubSect, SectorsFirstHalf);
   /* Ring from half, tail no checksum */
   fillPages({{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .noChecksum = true}});
   history.recoverFlash();
-  counter.expect("Ring from half, tail no checksum", FlashPageTotalSubSect, SectorsFirstHalf);
+  counter.expect("Ring from half, tail no checksum", FlashStats::PageTotalSubSect, SectorsFirstHalf);
   /* Ring from half, tail jump back */
   fillPages({{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .unixOffset = 1}});
   history.recoverFlash();
-  counter.expect("Ring from half, tail jump back", FlashPageTotalSubSect, SectorsFirstHalf);
+  counter.expect("Ring from half, tail jump back", FlashStats::PageTotalSubSect, SectorsFirstHalf);
   /* Ring from half, tail first page no magic */
   fillPages({{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalfSubSect}, {PagesFirstHalfSubSect, 16, .noMagic = true}});
   history.recoverFlash();
-  counter.expect("Ring from half, tail first page no magic", FlashPageTotalSubSect, SectorsFirstHalf);
+  counter.expect("Ring from half, tail first page no magic", FlashStats::PageTotalSubSect, SectorsFirstHalf);
   /* Ring from half, tail first page no checksum */
   fillPages({{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalfSubSect}, {PagesFirstHalfSubSect, 16, .noChecksum = true}});
   history.recoverFlash();
-  counter.expect("Ring from half, tail first page no checksum", FlashPageTotalSubSect, SectorsFirstHalf);
+  counter.expect("Ring from half, tail first page no checksum", FlashStats::PageTotalSubSect, SectorsFirstHalf);
   /* Ring from half, tail first page jump back */
   fillPages({{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalfSubSect}, {PagesFirstHalfSubSect, 16, .unixOffset = 1}});
   history.recoverFlash();

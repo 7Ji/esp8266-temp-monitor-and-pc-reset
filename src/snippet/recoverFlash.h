@@ -2,7 +2,7 @@
   void recoverOnFailureFirst(uint16_t &sectorID, uint16_t &flashSectorID) {
     Serial.println(", consider this sector bad and expect next sector to be head of second part of ring");
     headL2 = 0;
-    countL2 = sectorID << FlashSectPageFactor;
+    countL2 = sectorID << FlashStats::SectPageFactor;
     ++sectorID;
     ++flashSectorID;
   }
@@ -17,30 +17,30 @@
     Serial.println("Recovering first half");
     for (
       sectorID = 0,
-      flashSectorID = FlashSectStart;
+      flashSectorID = FlashStats::SectStart;
 
-      sectorID < FlashSectTotal;
+      sectorID < FlashStats::SectTotal;
 
       ++sectorID,
       ++flashSectorID
     ) {
       for (
         sectorPageID = 0,
-        pageID = sectorID << FlashSectPageFactor,
-        flashPageID = flashSectorID << FlashSectPageFactor,
+        pageID = sectorID << FlashStats::SectPageFactor,
+        flashPageID = flashSectorID << FlashStats::SectPageFactor,
         emptyCount = 0;
 
-        sectorPageID < FlashSectPageCount;
+        sectorPageID < FlashStats::SectPageCount;
 
         ++sectorPageID,
         ++pageID,
         ++flashPageID
       ) {
-        opResult = spi_flash_read(flashPageID << FlashPageExp, sliceL2Raw, FlashPageSize);
+        opResult = spi_flash_read(flashPageID << FlashStats::PageExp, sliceL2Raw, FlashStats::PageSize);
         if (opResult != SPI_FLASH_RESULT_OK) {
           Serial.printf("Failed to read page %" PRIu16 "/f%" PRIu16 " when recovering first part of flash, using good pages before it\n", pageID, flashPageID);
           headL2 = 0;
-          countL2 = sectorID << FlashSectPageFactor;
+          countL2 = sectorID << FlashStats::SectPageFactor;
           return true;
         }
         if (sliceL2.erased()) { /* Empty page */
@@ -62,14 +62,14 @@
           unixFirst = unixThis;
         }
         if (unixThis <= unixLast) { /* Jumping back, allowed only once, and only for the first page in sector */
-          if (pageID & FlashPageInSectMask) { /* Not first page in sector */
+          if (pageID & FlashStats::PageInSectMask) { /* Not first page in sector */
             Serial.printf("Page %" PRIu16 "/f%" PRIu16 " jump back and it's not the first page in sector", pageID, flashPageID);
             recoverOnFailureFirst(sectorID, flashSectorID);
             return false;
           } else { /* First page in sector, this is head of second part */
             Serial.printf("Page %" PRIu16 "/f%" PRIu16 " jump back and it's the first page in sector, consider this sector as head of second half of ring", pageID, flashPageID);
             headL2 = 0;
-            countL2 = sectorID << FlashSectPageFactor;
+            countL2 = sectorID << FlashStats::SectPageFactor;
             return false;
           }
         }
@@ -77,12 +77,12 @@
       }
       if (emptyCount) { /* With empty page in current, next shall be head */
         headL2 = 0;
-        countL2 = ((sectorID + 1) << FlashSectPageFactor) - emptyCount;
+        countL2 = ((sectorID + 1) << FlashStats::SectPageFactor) - emptyCount;
         return false;
       }
     }
     headL2 = 0;
-    countL2 = FlashPageTotal;
+    countL2 = FlashStats::PageTotal;
     return true;
   }
 
@@ -99,23 +99,23 @@
     Serial.println("Recovering second half");
     for (
       ;
-      sectorID < FlashSectTotal;
+      sectorID < FlashStats::SectTotal;
 
       ++sectorID,
       ++flashSectorID
     ) {
       for (
         sectorPageID = 0,
-        pageID = sectorID << FlashSectPageFactor,
-        flashPageID = flashSectorID << FlashSectPageFactor;
+        pageID = sectorID << FlashStats::SectPageFactor,
+        flashPageID = flashSectorID << FlashStats::SectPageFactor;
 
-        sectorPageID < FlashSectPageCount;
+        sectorPageID < FlashStats::SectPageCount;
 
         ++sectorPageID,
         ++pageID,
         ++flashPageID
       ) {
-        opResult = spi_flash_read(flashPageID << FlashPageExp, sliceL2Raw, FlashPageSize);
+        opResult = spi_flash_read(flashPageID << FlashStats::PageExp, sliceL2Raw, FlashStats::PageSize);
         if (opResult != SPI_FLASH_RESULT_OK) {
           Serial.printf("Failed to read page %" PRIu16 "/f%" PRIu16 " when recovering second part of flash", pageID, flashPageID);
           recoverOnFailureSecond();
@@ -149,7 +149,7 @@
       return;
     }
     headL2 = sectorStart;
-    countL2 += (FlashSectTotal - sectorStart) << FlashSectPageFactor;
+    countL2 += (FlashStats::SectTotal - sectorStart) << FlashStats::SectPageFactor;
   }
 
   void recoverFlash() {
@@ -161,7 +161,7 @@
       return;
     }
     Serial.printf("First half has %" PRIu16 " good pages\n", countL2);
-    if (sectorID < FlashSectTotal) {
+    if (sectorID < FlashStats::SectTotal) {
       recoverFlashSecond(sectorID, flashSectorID, unixFirst);
     }
   }

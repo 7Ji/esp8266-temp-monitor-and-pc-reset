@@ -309,6 +309,7 @@ struct SensorRecord {
 static_assert(sizeof(struct SensorRecord) == 6, "SensorRecord should have a size of 6");
 
 #include "snippet/sensorSlice.h"
+#include "snippet/flashStats.h"
 
 struct SensorHistory {
   COMPCONST uint32_t const MinInterval = 2000;
@@ -316,8 +317,7 @@ struct SensorHistory {
 
   COMPCONST uint8_t const RingMaskL0 = MaxHistoryL0 - 1;
 
-#include "snippet/flashStats.h"
-  static_assert(sizeof(struct SensorSlice) == FlashPageSize, "SensorSlice should have the same size as page");
+  static_assert(sizeof(struct SensorSlice) == FlashStats::PageSize, "SensorSlice should have the same size as page");
 
   union {
     SensorSlice sliceL1 = {.magic = SensorSlice::Magic};
@@ -337,11 +337,11 @@ struct SensorHistory {
   uint8_t countL0 = 0;
 
   uint16_t firstPage() const {
-    return headL2 << FlashSectPageFactor;
+    return headL2 << FlashStats::SectPageFactor;
   }
 
   uint16_t slicePage(uint16_t const sliceID) const {
-    return (firstPage() + sliceID) % FlashPageTotal;
+    return (firstPage() + sliceID) % FlashStats::PageTotal;
   }
 
   SensorValue &first() {
@@ -379,7 +379,7 @@ struct SensorHistory {
   }
 
   bool erase(uint16_t const sectorID) {
-    uint16_t const flashSectorID = sectorID + FlashSectStart;
+    uint16_t const flashSectorID = sectorID + FlashStats::SectStart;
     SpiFlashOpResult opResult;
 
     Serial.printf("Erasing sector %" PRIu16 "/f%" PRIu16 "\n", sectorID, flashSectorID);
@@ -392,11 +392,11 @@ struct SensorHistory {
   }
 
   bool writeL1(uint16_t const pageID) {
-    uint16_t const flashPageID = pageID + FlashPageStart;
+    uint16_t const flashPageID = pageID + FlashStats::PageStart;
     SpiFlashOpResult opResult;
 
     Serial.printf("Writing L1 to page %" PRIu16 "/f%" PRIu16 "\n", pageID, flashPageID);
-    opResult = spi_flash_write(flashPageID * FlashPageSize, sliceL1Raw, FlashPageSize);
+    opResult = spi_flash_write(flashPageID * FlashStats::PageSize, sliceL1Raw, FlashStats::PageSize);
     if (opResult != SPI_FLASH_RESULT_OK) {
       Serial.printf("Failed to write L1 to page %" PRIu16 "/f%" PRIu16 ", op result %d\n", pageID, flashPageID, opResult);
       return false;
@@ -434,17 +434,17 @@ struct SensorHistory {
 
   void flushL1L2() {
     uint16_t const pageID = slicePage(countL2);
-    bool const afterBoundary = pageID & FlashPageInSectMask;
+    bool const afterBoundary = pageID & FlashStats::PageInSectMask;
 
     Serial.printf("Flushing L1 to L2 flash page %" PRIu16 "\n", pageID);
 
     if (!afterBoundary) {
       /* Whether we successfully erase the sector or not, consider pages on it bad */
-      if (countL2 > FlashPageTotalSubSect) { /* Technically this could only be countL2 == FlashPageTotal, but do this securely */
-        headL2 = (headL2 + 1) % FlashSectTotal;
-        countL2 = FlashPageTotalSubSect;
+      if (countL2 > FlashStats::PageTotalSubSect) { /* Technically this could only be countL2 == FlashStats::PageTotal, but do this securely */
+        headL2 = (headL2 + 1) % FlashStats::SectTotal;
+        countL2 = FlashStats::PageTotalSubSect;
       }
-      if (!erase(pageID >> FlashSectPageFactor)) {
+      if (!erase(pageID >> FlashStats::SectPageFactor)) {
         fallbackShift();
         return;
       }
@@ -461,7 +461,7 @@ struct SensorHistory {
   bool fetchFlashPage(uint16_t const flashPageID) {
     SpiFlashOpResult opResult;
 
-    opResult = spi_flash_read(flashPageID * FlashPageSize, sliceL2Raw, FlashPageSize);
+    opResult = spi_flash_read(flashPageID * FlashStats::PageSize, sliceL2Raw, FlashStats::PageSize);
 
     if (opResult != SPI_FLASH_RESULT_OK) {
       Serial.printf("fetch f%" PRIu16 ": Read not OK, op result %d\n", flashPageID, opResult);
@@ -471,7 +471,7 @@ struct SensorHistory {
   }
 
   bool fetchPage(uint16_t const pageID) {
-    return fetchFlashPage(pageID + FlashPageStart);
+    return fetchFlashPage(pageID + FlashStats::PageStart);
   }
 
 #include "snippet/recoverFlash.h"
@@ -685,10 +685,10 @@ struct RawAllSender {
     if (history.countL2 > 0) {
       pageOffset = history.firstPage();
       if (pageOffset > 0) {
-        for (i = pageOffset; i < SensorHistory::FlashPageTotal; ++i) {
+        for (i = pageOffset; i < FlashStats::PageTotal; ++i) {
           sendPage(i);
         }
-        pageOffset = history.countL2 + pageOffset - SensorHistory::FlashPageTotal;
+        pageOffset = history.countL2 + pageOffset - FlashStats::PageTotal;
         for (i = 0; i < pageOffset; ++i) {
           sendPage(i);
         }
