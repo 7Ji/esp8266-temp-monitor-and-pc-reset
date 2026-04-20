@@ -473,7 +473,6 @@ struct SensorHistory {
   bool fetchPage(uint16_t const pageID) {
     return fetchFlashPage(pageID + FlashStats::PageStart);
   }
-
 #include "snippet/recoverFlash.h"
 
   void fetchAppend(uint32_t const millisCurrent) {

@@ -12,20 +12,12 @@
 typedef int SpiFlashOpResult;
 COMPCONST SpiFlashOpResult SPI_FLASH_RESULT_OK = 0;
 
-struct SerialMock {
-  template<typename... Args>
-  static size_t printf(const char* fmt, Args... args) {
-    return std::printf(fmt, args...);
-  }
-  static size_t println(const char *line) {
-    return std::puts(line);
-  }
+namespace Printer {
+  using std::printf;
+  static constexpr auto println = std::puts;
 };
 
-COMPCONST SerialMock const Serial;
-
 static uint8_t buffer[FlashStats::AddrEnd];
-
 
 static size_t ReadFailureOffset = SIZE_MAX;
 
@@ -77,6 +69,7 @@ static uint32_t crc32 (void const* const data, size_t length, uint32_t crc = 0xf
     return crc;
 }
 
+#define PRINTER Printer::
 #include "snippet/sensorSlice.h"
 
 struct SensorHistory {
@@ -87,6 +80,7 @@ struct SensorHistory {
   uint16_t countL2 = 0; /* page */
   uint16_t headL2 = 0; /* sector */
 
+#define PRINTER Printer::
 #include "snippet/recoverFlash.h"
 };
 
