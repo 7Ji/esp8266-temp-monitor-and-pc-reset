@@ -227,6 +227,14 @@
       return response.text();
     }
 
+    async function fetchArrayBuffer(path) {
+      const response = await fetch(apiUrl(path), {cache: 'no-store'});
+      if (!response.ok) {
+        throw new Error(path + ' => ' + response.status);
+      }
+      return response.arrayBuffer();
+    }
+
     function normalizeEntries(entries) {
       const ordered = entries
         .slice()
@@ -259,6 +267,45 @@
         Number.isFinite(entry.temperature) &&
         Number.isFinite(entry.humidity)
       );
+
+      return normalizeEntries(entries);
+    }
+
+    function parseDump(buffer) {
+      const view = new DataView(buffer);
+      const headerSize = 16;
+      const recordSize = 8;
+
+      if (buffer.byteLength < headerSize) {
+        throw new Error('Short dump header');
+      }
+      if (
+        view.getUint8(0) !== 69 ||
+        view.getUint8(1) !== 56 ||
+        view.getUint8(2) !== 50
+      ) {
+        throw new Error('Bad dump magic');
+      }
+      if (view.getUint8(3) !== 1) {
+        throw new Error('Unsupported dump version ' + view.getUint8(3));
+      }
+
+      const count = view.getUint32(4, true);
+      const unixOffset = Number(view.getBigUint64(8, true));
+      const expectedLength = headerSize + count * recordSize;
+
+      if (buffer.byteLength !== expectedLength) {
+        throw new Error('Bad dump length ' + buffer.byteLength + ' != ' + expectedLength);
+      }
+
+      const entries = [];
+      for (let offset = headerSize; offset < expectedLength; offset += recordSize) {
+        entries.push({
+          timestamp: unixOffset + view.getUint32(offset, true),
+          temperature: view.getInt8(offset + 4) + view.getUint8(offset + 5) / 10,
+          humidity: view.getUint8(offset + 6) + view.getUint8(offset + 7) / 10,
+        });
+      }
 
       return normalizeEntries(entries);
     }
@@ -689,7 +736,7 @@
     }
 
     async function refreshCurrent() {
-      const entries = parseRows(await fetchText('/raw'));
+      const entries = parseRows(await fetchText('/recent'));
       if (entries.length === 0) {
         throw new Error('No current data');
       }
@@ -705,12 +752,12 @@
     }
 
     async function refreshHistory() {
-      historyEntries = parseRows(await fetchText('/history'));
+      historyEntries = parseDump(await fetchArrayBuffer('/dump'));
       if (historyEntries.length > 0) {
         const entry = historyEntries[historyEntries.length - 1];
         document.getElementById('temperature').textContent = entry.temperature.toFixed(1);
         document.getElementById('humidity').textContent = entry.humidity.toFixed(1);
-        document.getElementById('graph-status').textContent = 'History loaded';
+        document.getElementById('graph-status').textContent = 'History loaded from binary dump';
       }
       document.getElementById('samples').textContent = String(historyEntries.length);
       drawAllGraphs();

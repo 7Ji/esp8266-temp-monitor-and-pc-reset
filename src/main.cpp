@@ -312,6 +312,15 @@ struct SensorRecord {
 
 static_assert(sizeof(struct SensorRecord) == 6, "SensorRecord should have a size of 6");
 
+struct DumpRecord {
+  uint32_t timestamp;
+  SensorValue value;
+};
+
+static_assert(sizeof(struct DumpRecord) == 8, "DumpRecord should have a size of 8");
+
+COMPCONST size_t const DumpHeaderSize = 16;
+
 #include "snippet/sensorSlice.h"
 #include "snippet/flashStats.h"
 
@@ -346,6 +355,10 @@ struct SensorHistory {
 
   uint16_t slicePage(uint16_t const sliceID) const {
     return (firstPage() + sliceID) % FlashStats::PageTotal;
+  }
+
+  uint32_t totalCount() const {
+    return uint32_t(countL2) * SensorSlice::MaxRecords + countL1 + countL0;
   }
 
   SensorValue &first() {
@@ -720,7 +733,111 @@ void httpHandleHistory() {
   sender.sendAll();
 }
 
-void httpHandleRaw() {
+struct DumpAllSender {
+  COMPCONST size_t const lenBuffer = SharedBufferSize;
+  COMPCONST size_t const lenMax = SharedBufferSize - sizeof(DumpRecord);
+
+  uint64_t unixOffset = 0;
+  size_t offset = 0;
+
+  DumpAllSender() {
+    uint32_t const totalCount = history.totalCount();
+
+    server.setContentLength(DumpHeaderSize + totalCount * sizeof(DumpRecord));
+#ifdef PRIVATE_ALLOW_CROSS
+    serverSendHeadersForRaw();
+#endif
+    if (totalCount > 0) {
+      history.first(unixOffset);
+    }
+    memcpy(sharedBytesBuffer, "E82\1", 4); /* Magic "E82", dump format version 1 */
+    memcpy(sharedBytesBuffer + 4, &totalCount, sizeof(totalCount));
+    memcpy(sharedBytesBuffer + 8, &unixOffset, sizeof(unixOffset));
+    server.send(200, "application/octet-stream", "", 0);
+    server.sendContent(sharedStrBuffer, DumpHeaderSize);
+  }
+
+  void sendValue(uint64_t const unixSeconds, SensorValue const &value) {
+    DumpRecord *const record = reinterpret_cast<DumpRecord *>(sharedBytesBuffer + offset);
+
+    record->timestamp = unixSeconds - unixOffset;
+    record->value = value;
+    if ((offset += sizeof(DumpRecord)) >= lenMax) {
+      server.sendContent(sharedStrBuffer, offset);
+      offset = 0;
+    }
+  }
+
+  void sendRingRecords(SensorValue const *values, uint64_t const *unixSeconds, uint8_t const head, uint8_t const count) {
+    uint8_t i;
+
+    for (i = head; i < count; ++i) {
+      sendValue(unixSeconds[i], values[i]);
+    }
+    for (i = 0; i < head; ++i) {
+      sendValue(unixSeconds[i], values[i]);
+    }
+  }
+
+  void sendSlice(SensorSlice const &slice, uint16_t const count = SensorSlice::MaxRecords) {
+    uint64_t const sliceUnixOffset = slice.unixOffset;
+    SensorRecord const *record;
+    uint16_t i;
+
+    for (i = 0; i < count; ++i) {
+      record = slice.records + i;
+      sendValue(sliceUnixOffset + record->timestamp, record->value);
+    }
+  }
+
+  void sendPage(uint16_t const pageID) {
+    if (!history.fetchPage(pageID)) {
+      return;
+    }
+    sendSlice(history.sliceL2);
+  }
+
+  void sendAll() {
+    uint16_t i, pageOffset;
+
+    if (history.countL2 > 0) {
+      pageOffset = history.firstPage();
+      if (pageOffset > 0) {
+        for (i = pageOffset; i < FlashStats::PageTotal; ++i) {
+          sendPage(i);
+        }
+        pageOffset = history.countL2 + pageOffset - FlashStats::PageTotal;
+        for (i = 0; i < pageOffset; ++i) {
+          sendPage(i);
+        }
+      } else {
+        for (i = 0; i < history.countL2; ++i) {
+          sendPage(i);
+        }
+      }
+    }
+    if (history.countL1 > 0) {
+      sendSlice(history.sliceL1, history.countL1);
+    }
+    if (history.countL0 > 0) {
+      sendRingRecords(history.valuesL0, history.unixSecondsL0, history.headL0, history.countL0);
+    }
+  }
+
+  ~DumpAllSender() {
+    if (offset) {
+      server.sendContent(sharedStrBuffer, offset);
+    }
+  }
+};
+
+void httpHandleDump() {
+  DumpAllSender sender = {};
+
+  sender.sendAll();
+}
+
+void httpHandleRecent() {
   uint64_t unixSeconds;
   size_t len;
 
@@ -842,8 +959,9 @@ void setup() {
   server.on("/humid", HTTP_GET, httpHandleHumid);
   server.on("/power", HTTP_POST, httpHandlePower);
   server.on("/reset", HTTP_POST, httpHandleReset);
-  server.on("/raw", HTTP_GET, httpHandleRaw);
+  server.on("/recent", HTTP_GET, httpHandleRecent);
   server.on("/history", HTTP_GET, httpHandleHistory);
+  server.on("/dump", HTTP_GET, httpHandleDump);
   server.onNotFound(httpHandleNotFound);
   server.begin();
 

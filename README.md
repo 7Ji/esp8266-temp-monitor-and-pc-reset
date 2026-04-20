@@ -108,7 +108,7 @@ Current routes:
 - `/last`: latest reading as plain text, intended to be used by scripts, format `temp,humidity`
 - `/temp`: only the latest temperature
 - `/humid`: only the latest humidity
-- `/raw`: latest reading as `timestamp,temp,humidity`
+- `/recent`: latest reading as `timestamp,temp,humidity`
 - `/history`: full available history, one sample per line as `timestamp,temp,humidity`
 - `/power`: authenticated `POST`, sends a short pulse on `PRIVATE_PIN_POWER`; requires header `Authorization: Bearer <PRIVATE_PC_AUTH>` and reply with `404` when unauthorized (to hide the route)
 - `/reset`: authenticated `POST`, sends a short pulse on `PRIVATE_PIN_RESET`; requires header `Authorization: Bearer <PRIVATE_PC_AUTH>` and reply with `404` when unauthorized (to hide the route)
