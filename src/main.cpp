@@ -7,8 +7,7 @@
 static_assert(sizeof(unsigned long) == sizeof(uint32_t), "unsigned long (would return by millis) is not 32 bit");
 
 #include "root.html.h"
-
-#define COMPCONST static inline constexpr
+#include "snippet/compConst.h"
 
 COMPCONST char const ConfigHostName[] = PRIVATE_HOSTNAME;
 COMPCONST char const ConfigWiFiSSID[] = PRIVATE_WIFI_SSID;

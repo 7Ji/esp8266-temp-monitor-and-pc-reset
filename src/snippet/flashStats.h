@@ -1,6 +1,5 @@
-#ifndef COMPCONST
-#define COMPCONST static inline constexpr
-#endif
+#pragma once
+#include "compConst.h"
   COMPCONST uint32_t const FlashAddrStart = 0x100000;
   COMPCONST uint32_t const FlashAddrEnd = 0x3FB000;
   COMPCONST int const FlashSectExp = 12;
