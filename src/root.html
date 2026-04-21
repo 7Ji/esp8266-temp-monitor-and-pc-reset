@@ -126,7 +126,7 @@
         canvasId: 'graph-five-minutes',
         summaryId: 'summary-five-minutes',
         windowSeconds: 5 * 60,
-        boundaryUnit: null,
+        boundaryUnit: 'minute',
       },
       {
         key: 'hour',
@@ -161,7 +161,7 @@
         canvasId: 'graph-all',
         summaryId: 'summary-all',
         windowSeconds: null,
-        boundaryUnit: null,
+        boundaryUnit: 'month',
       }
     ];
     const graphStates = {};
@@ -342,6 +342,12 @@
     function nextBoundaryAfter(boundaryUnit, wallClockMs) {
       const date = new Date(wallClockMs);
 
+      if (boundaryUnit === 'minute') {
+        date.setSeconds(0, 0);
+        date.setMinutes(date.getMinutes() + 1);
+        return date.getTime();
+      }
+
       if (boundaryUnit === 'five-minute') {
         date.setSeconds(0, 0);
         date.setMinutes(Math.floor(date.getMinutes() / 5) * 5);
@@ -369,11 +375,23 @@
         return date.getTime();
       }
 
+      if (boundaryUnit === 'month') {
+        date.setHours(0, 0, 0, 0);
+        date.setDate(1);
+        date.setMonth(date.getMonth() + 1);
+        return date.getTime();
+      }
+
       return NaN;
     }
 
     function advanceBoundary(boundaryUnit, wallClockMs) {
       const date = new Date(wallClockMs);
+
+      if (boundaryUnit === 'minute') {
+        date.setMinutes(date.getMinutes() + 1);
+        return date.getTime();
+      }
 
       if (boundaryUnit === 'five-minute') {
         date.setMinutes(date.getMinutes() + 5);
@@ -392,6 +410,12 @@
 
       if (boundaryUnit === 'week') {
         date.setDate(date.getDate() + 7);
+        return date.getTime();
+      }
+
+      if (boundaryUnit === 'month') {
+        date.setDate(1);
+        date.setMonth(date.getMonth() + 1);
         return date.getTime();
       }
 
