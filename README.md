@@ -94,9 +94,9 @@ value[4]
 
 The page is exactly 256 bytes, matching the ESP8266 flash page write size. `timestamp` is the per-record second offset from the slice `unixOffset`, with the first record in each slice always stored as offset `0`. `L0` keeps only `SensorValue` entries plus the parallel absolute Unix timestamp array; `SensorRecord` is used by `L1` and `L2` where compact per-slice offsets are useful. `checksum` is CRC32 over `unixOffset` and the full records array.
 
-On boot, recovery scans the whole `L2` flash range page-by-page and builds sector-aligned candidate chains from valid pages. Empty pages are treated as erased space, and all-empty sectors are skipped, so valid history can be recovered even when it starts at a later sector instead of at the beginning of flash. Inside one candidate chain, pages must be contiguous and ordered by `unixOffset`, which acts as the page's implicit monotonic identifier. In this firmware that is a practical ordering key because each page is written about every 42.7 minutes and `unixOffset` is not allowed to move backwards.
+On boot, recovery scans the whole `L2` flash range sector-by-sector, reading one full 4 KiB sector at a time into the shared static buffer and then inspecting its 16 pages in memory. Empty pages are treated as erased space, and all-empty sectors are skipped, so valid history can be recovered even when it starts at a later sector instead of at the beginning of flash. Inside one candidate chain, pages must be contiguous and ordered by `unixOffset`, which acts as the page's implicit monotonic identifier. In this firmware that is a practical ordering key because each page is written about every 42.7 minutes and `unixOffset` is not allowed to move backwards.
 
-If a read failure, bad page, non-empty page after an empty page, or backwards `unixOffset` is found, recovery closes the current candidate and continues scanning from the next recoverable sector. A backwards jump on the first page of a sector starts a new candidate at that sector, matching the sector-boundary ring-wrap behavior of the writer. After the scan, recovery chooses the candidate with the newest end timestamp. As a special case, if one candidate starts at the beginning of flash and another ends exactly at the end of flash, recovery joins them as a wrapped ring only when the beginning candidate is newer than the tail candidate; otherwise it keeps the newer candidate. This supports orphaned valid chunks in the middle of flash as well as the usual fresh chain and wrapped-ring layouts.
+If a sector read fails, a written page is invalid, a non-empty page appears after an empty page in the same sector, or `unixOffset` goes backwards, recovery closes the current candidate and continues scanning from the next recoverable sector. A backwards jump on the first page of a sector starts a new candidate at that sector, matching the sector-boundary ring-wrap behavior of the writer. After the scan, recovery chooses the candidate with the newest end timestamp, using the final record timestamp within the candidate's last page instead of only that page's base `unixOffset`. As a special case, if one candidate starts at the beginning of flash and another ends exactly at the end of flash, recovery joins them as a wrapped ring only when the beginning candidate is newer than the tail candidate; otherwise it keeps the newer candidate. This supports orphaned valid chunks in the middle of flash as well as the usual fresh chain and wrapped-ring layouts.
 
 ## Web Interface and API
 
@@ -133,7 +133,7 @@ ESP8266 side                          Motherboard side
 
 D1 / GPIO5 ---[680R..1k]--- pin 1    pin 4 -------- PWR_SW signal
 ESP GND ------------------- pin 2    pin 3 -------- PWR_SW GND
-                             PC817
+                                PC817
 
 
 Reset channel
@@ -144,7 +144,7 @@ ESP8266 side                          Motherboard side
 
 D2 / GPIO4 ---[680R..1k]--- pin 1    pin 4 -------- RESET_SW signal
 ESP GND ------------------- pin 2    pin 3 -------- RESET_SW GND
-                             PC817
+                                PC817
 ```
 
 ## PC Control Request
