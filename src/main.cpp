@@ -776,49 +776,29 @@ void serverSendHeadersForRaw() {
 }
 #endif
 
-struct RawAllSender {
-  COMPCONST size_t const lenBuffer = SharedBufferSize;
-  COMPCONST size_t const lenMax = SharedBufferSize - SensorValue::lenBuffer;
-
-  size_t len;
-  size_t offset = 0;
-
-  RawAllSender() {
-    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-#ifdef PRIVATE_ALLOW_CROSS
-    serverSendHeadersForRaw();
-#endif
-    server.send(200, "text/plain", "", 0);
-  }
-
-  void sendValue(uint64_t const unixSeconds, SensorValue const &value) {
-    if (value.intoStr(unixSeconds, sharedStrBuffer + offset, len)) {
-      if ((offset += len) >= lenMax) {
-        server.sendContent(sharedStrBuffer, offset);
-        offset = 0;
-      }
-    }
-  }
+template<typename Each>
+struct AllSender {
+  Each each;
 
   void sendRingRecords(SensorValue const *values, uint64_t const *unixSeconds, uint8_t const head, uint8_t const count) {
     uint8_t i;
 
     for (i = head; i < count; ++i) {
-      sendValue(unixSeconds[i], values[i]);
+      each.sendValue(unixSeconds[i], values[i]);
     }
     for (i = 0; i < head; ++i) {
-      sendValue(unixSeconds[i], values[i]);
+      each.sendValue(unixSeconds[i], values[i]);
     }
   }
 
   void sendSlice(SensorSlice const &slice, uint16_t const count = SensorSlice::MaxRecords) {
-    uint64_t const unixOffset = slice.unixOffset;
+    uint64_t const sliceUnixOffset = slice.unixOffset;
     SensorRecord const *record;
     uint16_t i;
 
     for (i = 0; i < count; ++i) {
       record = slice.records + i;
-      sendValue(unixOffset + record->timestamp, record->value);
+      each.sendValue(sliceUnixOffset + record->timestamp, record->value);
     }
   }
 
@@ -854,31 +834,55 @@ struct RawAllSender {
     if (history.countL0 > 0) {
       sendRingRecords(history.valuesL0, history.unixSecondsL0, history.headL0, history.countL0);
     }
-
   }
 
-  ~RawAllSender() {
-    if (offset) {
-      server.sendContent(sharedStrBuffer, offset);
+  void flushBuffered() {
+    if (each.offset) {
+      server.sendContent(sharedStrBuffer, each.offset);
+      each.offset = 0;
     }
-    server.sendContent("", 0);
+  }
+};
+
+struct HistoryEach {
+  COMPCONST size_t const lenMax = SharedBufferSize - SensorValue::lenBuffer;
+
+  size_t len;
+  size_t offset = 0;
+
+  HistoryEach() {
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+#ifdef PRIVATE_ALLOW_CROSS
+    serverSendHeadersForRaw();
+#endif
+    server.send(200, "text/plain", "", 0);
+  }
+
+  void sendValue(uint64_t const unixSeconds, SensorValue const &value) {
+    if (value.intoStr(unixSeconds, sharedStrBuffer + offset, len)) {
+      if ((offset += len) >= lenMax) {
+        server.sendContent(sharedStrBuffer, offset);
+        offset = 0;
+      }
+    }
   }
 };
 
 void httpHandleHistory() {
-  RawAllSender sender = {};
+  AllSender<HistoryEach> sender = {};
 
   sender.sendAll();
+  sender.flushBuffered();
+  server.sendContent("", 0);
 }
 
-struct DumpAllSender {
-  COMPCONST size_t const lenBuffer = SharedBufferSize;
+struct DumpEach {
   COMPCONST size_t const lenMax = SharedBufferSize - sizeof(DumpRecord);
 
   uint64_t unixOffset = 0;
   size_t offset = 0;
 
-  DumpAllSender() {
+  DumpEach() {
     uint32_t const totalCount = history.totalCount();
 
     server.setContentLength(DumpHeaderSize + totalCount * sizeof(DumpRecord));
@@ -905,74 +909,13 @@ struct DumpAllSender {
       offset = 0;
     }
   }
-
-  void sendRingRecords(SensorValue const *values, uint64_t const *unixSeconds, uint8_t const head, uint8_t const count) {
-    uint8_t i;
-
-    for (i = head; i < count; ++i) {
-      sendValue(unixSeconds[i], values[i]);
-    }
-    for (i = 0; i < head; ++i) {
-      sendValue(unixSeconds[i], values[i]);
-    }
-  }
-
-  void sendSlice(SensorSlice const &slice, uint16_t const count = SensorSlice::MaxRecords) {
-    uint64_t const sliceUnixOffset = slice.unixOffset;
-    SensorRecord const *record;
-    uint16_t i;
-
-    for (i = 0; i < count; ++i) {
-      record = slice.records + i;
-      sendValue(sliceUnixOffset + record->timestamp, record->value);
-    }
-  }
-
-  void sendPage(uint16_t const pageID) {
-    if (!history.fetchPage(pageID)) {
-      return;
-    }
-    sendSlice(history.sliceL2);
-  }
-
-  void sendAll() {
-    uint16_t i, pageOffset;
-
-    if (history.countL2 > 0) {
-      pageOffset = history.firstPage();
-      if (pageOffset > 0) {
-        for (i = pageOffset; i < FlashStats::PageTotal; ++i) {
-          sendPage(i);
-        }
-        pageOffset = history.countL2 + pageOffset - FlashStats::PageTotal;
-        for (i = 0; i < pageOffset; ++i) {
-          sendPage(i);
-        }
-      } else {
-        for (i = 0; i < history.countL2; ++i) {
-          sendPage(i);
-        }
-      }
-    }
-    if (history.countL1 > 0) {
-      sendSlice(history.sliceL1, history.countL1);
-    }
-    if (history.countL0 > 0) {
-      sendRingRecords(history.valuesL0, history.unixSecondsL0, history.headL0, history.countL0);
-    }
-  }
-
-  ~DumpAllSender() {
-    if (offset) {
-      server.sendContent(sharedStrBuffer, offset);
-    }
-  }
 };
 
 void httpHandleDump() {
-  DumpAllSender sender = {};
+  AllSender<DumpEach> sender = {};
 
   sender.sendAll();
+  sender.flushBuffered();
 }
 
 void httpHandleRecent() {
