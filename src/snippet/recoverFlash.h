@@ -134,4 +134,5 @@
       headL2 = best.head;
       countL2 = best.count;
     }
+    PRINTER printf("Recovered %" PRIu16 " slices from flash, head is %" PRIu16 "\n", countL2, headL2);
   }

@@ -81,6 +81,147 @@ struct UpTimer {
 
 static UpTimer upTimer = {};
 
+struct WiFiKeeper {
+  COMPCONST size_t const WantedLen = sizeof(ConfigWiFiSSID) - 1;
+  COMPCONST uint8_t const BssidSize = 6;
+  /*
+     0 ... 15 seconds : no reconnect
+    15 ...    seconds : reconnect with current setup
+    60 ...    seconds : reconnect with current setup, then rescan
+  */
+  COMPCONST uint32_t const ThresholdDisconnect = 15000;
+  COMPCONST uint32_t const ThresholdReconnect = ThresholdDisconnect;
+  COMPCONST uint32_t const ThresholdScan = 60000;
+
+  uint8_t bssid[BssidSize] = {};
+  uint8_t bssidLength = 0;
+  uint8_t channel = 0;
+  bool connected = false;
+  uint32_t millisDisconnect = 0;
+  uint32_t millisConnect = 0;
+  uint32_t millisScan = 0;
+
+  void beginChosen(uint32_t const millisCurrent) {
+    Serial.printf("Connecting to ch %" PRIu8 " @ " MACSTR "\n", channel, MAC2STR(bssid));
+    WiFi.begin(ConfigWiFiSSID, ConfigWiFiPassword, channel, bssidLength == BssidSize ? bssid : nullptr);
+    millisConnect = millisCurrent;
+  }
+
+  bool scanChoose(uint32_t const millisCurrent) {
+    bss_info const *info;
+    int8_t countNetworks, i;
+    int32_t bestRSSI = INT32_MIN;
+
+    Serial.println("Scanning network...");
+    countNetworks = WiFi.scanNetworks();
+    if (countNetworks <= 0) {
+      Serial.println("No network discovered");
+      return false;
+    }
+    Serial.printf("Discovered %" PRId8 " networks, filtering\n", countNetworks);
+    for (i = 0; i < countNetworks; ++i) {
+      info = WiFi.getScanInfoByIndex(i);
+      if (!info) {
+        continue;
+      }
+      Serial.printf(
+        "[%02" PRId8 "] %-20.*s (" MACSTR ") %5" PRId8 " dBm @ ch %" PRIu8 "\n",
+        i,
+        int(info->ssid_len), reinterpret_cast<char const *>(info->ssid),
+        MAC2STR(info->bssid),
+        info->rssi, info->channel
+      );
+      if (info->ssid_len != WantedLen || memcmp(info->ssid, ConfigWiFiSSID, WantedLen)) {
+        continue;
+      }
+      if (info->rssi > bestRSSI) {
+        if (bestRSSI == INT32_MIN) {
+          Serial.println(" => FOUND");
+        } else {
+          Serial.println(" => REPLACE");
+        }
+        bestRSSI = info->rssi;
+        channel = info->channel;
+        bssidLength = BssidSize;
+        memcpy(bssid, info->bssid, BssidSize);
+      } else {
+        Serial.println(" => BYPASS");
+      }
+    }
+    WiFi.scanDelete();
+    if (bestRSSI == INT32_MIN || !bssidLength) {
+      Serial.println("Did not find any matching network");
+      return false;
+    }
+    Serial.printf("Chose target AP on ch %" PRIu8 " @ " MACSTR "\n", channel, MAC2STR(bssid));
+    millisScan = millisCurrent;
+    return true;
+  }
+
+  void markConnected() {
+    if (!connected) {
+      Serial.print("WiFi IP: ");
+      Serial.print(WiFi.localIP());
+      Serial.print(" / ");
+      Serial.print(WiFi.subnetMask());
+      Serial.print(", Gateway: ");
+      Serial.println(WiFi.gatewayIP());
+    }
+    connected = true;
+    millisDisconnect = 0;
+  }
+
+  void init(uint32_t const millisCurrent) {
+    for (;;) {
+      if (scanChoose(millisCurrent)) {
+        beginChosen(millisCurrent);
+        for (uint8_t i = 0; i < MaxWaits; ++i) {
+          if (WiFi.status() == WL_CONNECTED) {
+            markConnected();
+            return;
+          }
+          delay(500);
+        }
+      }
+      Serial.println("Failed to connect, restart scanning process after 1 second");
+      delay(OneSecondAsMs);
+    }
+  }
+
+  void maybeReconnect(uint32_t const millisCurrent) {
+    if (WiFi.status() == WL_CONNECTED) {
+      markConnected();
+      return;
+    }
+    if (connected) {
+      Serial.println("WiFi disconnected");
+      connected = false;
+      millisDisconnect = millisCurrent;
+    }
+    if (millisCurrent - millisDisconnect < ThresholdDisconnect) {
+      return;
+    }
+    if (millisCurrent - millisConnect >= ThresholdReconnect) {
+      Serial.println("WiFi still disconnected, retrying saved AP");
+      WiFi.reconnect();
+      millisConnect = millisCurrent;
+      delay(500);
+      if (WiFi.status() == WL_CONNECTED) {
+        return;
+      }
+    }
+    if (millisCurrent - millisScan >= ThresholdScan) {
+      Serial.println("WiFi still disconnected, rescanning target AP");
+      if (scanChoose(millisCurrent)) {
+        beginChosen(millisCurrent);
+        return;
+      }
+    }
+  }
+};
+
+static WiFiKeeper wifiKeeper = {};
+
 struct NtpSyncer {
   COMPCONST uint32_t const MinInterval = 3600000UL;
   COMPCONST uint32_t const NtpUnixOffset = 2208988800UL;
@@ -854,14 +995,7 @@ void httpHandleRoot() {
 }
 
 void setup() {
-  static String const wantedSSID = String(ConfigWiFiSSID);
-
-  bool recoverFlash = false;
-  int8_t countNetworks, bestScanID;
-  uint8_t i, *currentBSSID;
-  int32_t bestRSSI, currentRSSI, currentChannel;
   uint32_t millisCurrent;
-  String currentSSID;
 
   pinMode(PcPinPower, OUTPUT);
   digitalWrite(PcPinPower, LOW);
@@ -869,87 +1003,13 @@ void setup() {
   digitalWrite(PcPinReset, LOW);
 
   Serial.begin(ConfigBaudRate);
+  history.recoverFlash();
+
   WiFi.setHostname(ConfigHostName);
   WiFi.setAutoReconnect(true);
 
-  for (;;) {
-    for (;;) {
-      Serial.println("Scanning network...");
-      countNetworks = WiFi.scanNetworks();
-      if (countNetworks > 0) {
-        Serial.printf("Discovered %" PRId8 " networks, filtering\n", countNetworks);
-        break;
-      }
-      Serial.println("No network discovered, would rescan after 1 second");
-      delay(OneSecondAsMs);
-    }
-
-    bestRSSI = INT32_MIN;
-    bestScanID = -1;
-
-    for (i = 0; i < countNetworks; ++i) {
-      currentSSID = WiFi.SSID(i);
-      currentRSSI = WiFi.RSSI(i);
-      currentChannel = WiFi.channel(i);
-      currentBSSID = WiFi.BSSID(i);
-      Serial.printf(
-        "[%02" PRId8 "] %-20s (%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ") %5" PRId32 " dBm @ ch %" PRId32 "\n",
-        i, currentSSID.c_str(),
-        currentBSSID[0], currentBSSID[1], currentBSSID[2],
-        currentBSSID[3], currentBSSID[4], currentBSSID[5],
-        currentRSSI, currentChannel
-      );
-      if (currentSSID != wantedSSID) {
-        continue;
-      }
-      if (currentRSSI > bestRSSI) {
-        if (bestRSSI == INT32_MIN) {
-          Serial.println(" => FOUND");
-        } else {
-          Serial.println(" => REPLACE");
-        }
-        bestRSSI = currentRSSI;
-        bestScanID = i;
-      } else {
-        Serial.println(" => BYPASS");
-      }
-    }
-    if (bestRSSI == INT32_MIN || bestScanID == -1) {
-      Serial.println("Did not find any matching network, would rescan after 1 second");
-      WiFi.scanDelete();
-      delay(OneSecondAsMs);
-      continue;
-    }
-    Serial.printf("Chose %" PRId8 " as target AP\n", bestScanID);
-    WiFi.begin(ConfigWiFiSSID, ConfigWiFiPassword, WiFi.channel(bestScanID), WiFi.BSSID(bestScanID));
-    WiFi.scanDelete();
-
-    if (!recoverFlash) {
-      /* This might be slow so do it before waiting for online */
-      history.recoverFlash();
-      Serial.printf("Recovered %" PRIu16 " slices from flash, head is %" PRIu16 "\n", history.countL2, history.headL2);
-      recoverFlash = true;
-    }
-    for (i = 0; i < MaxWaits; ++i) {
-      if (WiFi.status() == WL_CONNECTED) {
-        break;
-      }
-      delay(500);
-    }
-    if (i < MaxWaits) {
-      Serial.print("WiFi IP: ");
-      Serial.print(WiFi.localIP());
-      Serial.print(" / ");
-      Serial.print(WiFi.subnetMask());
-      Serial.print(", Gateway: ");
-      Serial.println(WiFi.gatewayIP());
-      break;
-    }
-    Serial.println("Failed to connect, restart scanning process after 1 second");
-    delay(OneSecondAsMs);
-  }
-
   millisCurrent = upTimer.currentMillis();
+  wifiKeeper.init(millisCurrent);
   ntpSyncer.firstUpdate(millisCurrent);
   history.firstFetchAppend(millisCurrent);
 
@@ -973,6 +1033,7 @@ void loop() {
 
   server.handleClient();
   millisCurrent = upTimer.currentMillis();
+  wifiKeeper.maybeReconnect(millisCurrent);
   ntpSyncer.maybeUpdate(millisCurrent);
   history.maybeFetchAppend(millisCurrent);
 }
