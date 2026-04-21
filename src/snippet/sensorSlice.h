@@ -14,18 +14,6 @@ struct SensorSlice {
   uint64_t unixOffset;
   SensorRecord records[MaxRecords];
 
-  bool erased() {
-    uint32_t const *const raw = reinterpret_cast<uint32_t const *>(this);
-    uint8_t wordID;
-
-    for (wordID = 0; wordID < CountAll32; ++ wordID) {
-      if (raw[wordID] != UINT32_MAX) {
-        return false;
-      }
-    }
-    return true;
-  }
-
   uint32_t actualChecksum() const {
     return crc32(&unixOffset, sizeof(unixOffset) + sizeof(records));
   }
@@ -47,7 +35,7 @@ struct SensorSlice {
     }
   }
 
-  bool valid() {
+  bool valid() const {
     uint32_t expectedChecksum;
     uint16_t timestampLast = 0, timestampThis;
     uint8_t recordID;

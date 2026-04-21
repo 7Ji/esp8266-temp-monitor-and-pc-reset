@@ -21,7 +21,6 @@ COMPCONST char const PcPowerOk[] PROGMEM = "Power button pulse sent";
 COMPCONST char const PcResetOk[] PROGMEM = "Reset button pulse sent";
 
 COMPCONST unsigned long const OneSecondAsMs = 1'000;
-COMPCONST size_t const SharedBufferSize = 4096;
 COMPCONST uint8_t const MaxWaits = 20;
 COMPCONST uint8_t const PcPinPower =
 #ifdef PRIVATE_PIN_POWER
@@ -45,9 +44,7 @@ D4
 #endif
 , DHT11);
 static ESP8266WebServer server(80);
-static byte _sharedBuffer[SharedBufferSize];
-static byte *const sharedBytesBuffer = _sharedBuffer;
-static char *const sharedStrBuffer = reinterpret_cast<char *>(sharedBytesBuffer);
+#include "snippet/sharedBuffer.h"
 
 #define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 

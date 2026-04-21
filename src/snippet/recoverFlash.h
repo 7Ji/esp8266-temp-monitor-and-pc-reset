@@ -19,17 +19,26 @@
         *this = other;
       }
     }
+
+    void init(uint16_t const sectorID) {
+      head = sectorID;
+      count = 0;
+      clockBegin = 0;
+      clockEnd = 0;
+    }
   };
 
   void recoverSlices(SlicesCandidate &best, SlicesCandidate &current, uint16_t &sectorID, uint16_t &flashSectorID) {
+    static SensorSlice const *SharedSlicesBuffer = reinterpret_cast<SensorSlice const *>(sharedBytesBuffer);
+    static constexpr uint16_t WrittenBit = 0b1;
+
+    SensorSlice const *slice;
     SpiFlashOpResult opResult;
     uint64_t unixThis, unixLast = 0;
-    uint16_t sectorPageID, pageID, flashPageID;
-    uint8_t emptyCount;
-    current.head = sectorID;
-    current.count = 0;
-    current.clockBegin = 0;
-    current.clockEnd = 0;
+    uint32_t *pageWordsBuffer;
+    uint16_t pageID, flashPageID, writtenMask;
+    uint8_t sectorPageID, pageWordID, emptyCount, *sliceRaw;
+    current.init(sectorID);
 
     for (
       ;
@@ -38,26 +47,56 @@
       ++sectorID,
       ++flashSectorID
     ) {
+      opResult = spi_flash_read(flashSectorID << FlashStats::SectExp, sharedWordsBuffer, FlashStats::SectSize);
+      if (opResult != SPI_FLASH_RESULT_OK) {
+        PRINTER printf("Failed to read sector %" PRIu16 "/f%" PRIu16 " when recovering flash\n", sectorID, sectorID);
+        best.maybeReplaceBeforeSector(current, sectorID++);
+        ++flashSectorID;
+        return;
+      }
+      writtenMask = 0;
+      for (
+        sectorPageID = 0,
+        pageWordsBuffer = sharedWordsBuffer;
+
+        sectorPageID < FlashStats::SectPageCount;
+
+        ++sectorPageID,
+        pageWordsBuffer += FlashStats::PageWordCount
+      ) {
+        for (pageWordID = 0; pageWordID < FlashStats::PageWordCount; ++pageWordID) {
+          if (pageWordsBuffer[pageWordID] != UINT32_MAX) {
+            writtenMask |= (WrittenBit << sectorPageID);
+            break;
+          }
+        }
+      }
+      if (!writtenMask) { /* An erased sector that's not written yet */
+        if (sectorID == current.head && sectorID > 0 && sectorID < FlashStats::SectTotal - 1) { /* Just scanning first sector, step without return, but not for flash begining or end */
+          current.init(sectorID + 1);
+          continue;
+        }
+        best.maybeReplaceBeforeSector(current, sectorID++);
+        ++flashSectorID;
+        return;
+      }
       for (
         sectorPageID = 0,
         pageID = sectorID << FlashStats::SectPageFactor,
         flashPageID = flashSectorID << FlashStats::SectPageFactor,
-        emptyCount = 0;
+        emptyCount = 0,
+        slice = SharedSlicesBuffer,
+        sliceRaw = sharedBytesBuffer;
 
         sectorPageID < FlashStats::SectPageCount;
 
         ++sectorPageID,
         ++pageID,
-        ++flashPageID
+        ++flashPageID,
+        ++slice,
+        sliceRaw += FlashStats::PageSize
       ) {
-        opResult = spi_flash_read(flashPageID << FlashStats::PageExp, sliceL2Raw, FlashStats::PageSize);
-        if (opResult != SPI_FLASH_RESULT_OK) {
-          PRINTER printf("Failed to read page %" PRIu16 "/f%" PRIu16 " when recovering  flash\n", pageID, flashPageID);
-          best.maybeReplaceBeforeSector(current, sectorID++);
-          ++flashSectorID;
-          return;
-        }
-        if (sliceL2.erased()) { /* Empty page */
+        if (!(writtenMask & (WrittenBit << sectorPageID))) {
           ++emptyCount;
           continue;
         }
@@ -67,13 +106,13 @@
           ++flashSectorID;
           return;
         }
-        if (!sliceL2.valid()) { /* Invalid page */
+        if (!slice->valid()) { /* Invalid page */
           PRINTER printf("Invalid page %" PRIu16 "/f%" PRIu16 "\n", pageID, flashPageID);
           best.maybeReplaceBeforeSector(current, sectorID++);
           ++flashSectorID;
           return;
         }
-        unixThis = sliceL2.unixOffset;
+        unixThis = slice->unixOffset;
         if (!current.clockBegin) {
           current.clockBegin = unixThis;
         }
@@ -89,7 +128,7 @@
             return;
           }
         }
-        unixLast = unixThis;
+        unixLast = unixThis + slice->records[SensorSlice::MaxRecordsSub1].timestamp;
       }
       current.clockEnd = unixLast; /* Only updated per sector */
       if (emptyCount) { /* With empty page in current, next shall be head */

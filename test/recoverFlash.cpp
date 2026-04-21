@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "snippet/flashStats.h"
+#include "snippet/sharedBuffer.h"
 
 typedef int SpiFlashOpResult;
 COMPCONST SpiFlashOpResult SPI_FLASH_RESULT_OK = 0;
@@ -56,13 +57,12 @@ static uint8_t buffer[FlashStats::AddrEnd];
 static void *const bufferSlices = buffer + FlashStats::AddrStart;
 static SensorSlice *const slicesAll = reinterpret_cast<SensorSlice *>(bufferSlices);
 
-static std::vector<uint16_t> NoBrokenBufferPages = {};
-static std::vector<uint16_t> &brokenBufferPages = NoBrokenBufferPages;
+static std::vector<uint16_t> NoBrokenBufferSectors = {};
+static std::vector<uint16_t> &brokenBufferSectors = NoBrokenBufferSectors;
 
 SpiFlashOpResult spi_flash_read(size_t const offset, void *const target, size_t const size) {
-  if (!brokenBufferPages.empty()) {
-    uint16_t const pageID = (offset - FlashStats::AddrStart) >> FlashStats::PageExp;
-    if (std::binary_search(brokenBufferPages.begin(), brokenBufferPages.end(), pageID)) {
+  if (!brokenBufferSectors.empty()) {
+    if (std::binary_search(brokenBufferSectors.begin(), brokenBufferSectors.end(), (offset - FlashStats::AddrStart) >> FlashStats::SectExp)) {
       return 1;
     }
   }
@@ -71,10 +71,6 @@ SpiFlashOpResult spi_flash_read(size_t const offset, void *const target, size_t 
 }
 
 struct SensorHistory {
-  union {
-    SensorSlice sliceL2; /* about minutely, flush to flash every 30 minutes */
-    uint32_t sliceL2Raw[sizeof(SensorSlice) / sizeof(uint32_t)];
-  };
   uint16_t countL2 = 0; /* page */
   uint16_t headL2 = 0; /* sector */
 
@@ -99,7 +95,7 @@ struct Tester {
   size_t pass = 0;
   size_t total = 0;
 
-  void run(char const *const title, uint16_t const head, uint16_t const count, std::vector<PagePlan> const &plans, std::vector<uint16_t> brokenPages = {}) {
+  void run(char const *const title, uint16_t const head, uint16_t const count, std::vector<PagePlan> const &plans, std::vector<uint16_t> brokenSectors = {}) {
     memset(bufferSlices, 0xFF, bufferSlicesSize);
 
     uint64_t unixOffset = 1;
@@ -126,9 +122,9 @@ struct Tester {
         unixOffset += 3600;
       }
     }
-    std::sort(brokenPages.begin(), brokenPages.end());
-    brokenBufferPages = brokenPages;
-    std::printf("%zu broken pages\n", brokenBufferPages.size());
+    std::sort(brokenSectors.begin(), brokenSectors.end());
+    brokenBufferSectors = brokenSectors;
+    std::printf("%zu broken pages\n", brokenBufferSectors.size());
     history.recoverFlash();
     bool const cond = count == history.countL2 && head == history.headL2;
     pass += cond;
@@ -165,7 +161,7 @@ int main() {
   tester.run("No magic at second sector head", 0, 16, {{0, 16}, {16, 1, .noMagic = true}});
   tester.run("No checksum at second sector head", 0, 16, {{0, 16}, {16, 1, .noChecksum = true}});
   tester.run("Jump back at second sector head", 1, 17, {{0, 16}, {16, 17, .unixOffset = 1}});
-  tester.run("Read failure at second sector head", 0, 16, {{0, 32}}, {16});
+  tester.run("Read failure at second sector", 0, 16, {{0, 32}}, {1});
   tester.run("Non-empty page after empty page in same sector", 0, 16, {{0, 16}, {17, 1}});
   tester.run("Invalid timestamp at second sector head", 0, 16, {{0, 16}, {16, 1, .nonZeroTimestamp = true}});
   tester.run("Last record timestamp not increasing in second sector head", 0, 16, {{0, 16}, {16, 1, .lastRecordNotIncreasing = true}});
@@ -184,7 +180,7 @@ int main() {
   tester.run("Ring from half, second half empty", SectorsFirstHalf, PagesSecondHalf, {{PagesFirstHalf, PagesSecondHalf}});
   tester.run("Ring from half, second half no checksum", 0, PagesFirstHalf, {{PagesFirstHalf, PagesSecondHalf, .noChecksum = true}, {0, PagesFirstHalf}});
   tester.run("Ring from half, second half jump back", 0, PagesFirstHalf, {{PagesFirstHalf, PagesSecondHalf - 1}, {0, PagesFirstHalf}, {FlashStats::PageTotal - 1, 1, .unixOffset = 1}});
-  tester.run("Ring from half, second half read failure", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf}}, {PagesFirstHalf - 1});
+  tester.run("Ring from half, second half read failure", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf}}, {SectorsFirstHalf - 1});
   tester.run("Ring from half, no wraparound at end", PagesFirstHalf > PagesSecondHalf ? 0 : SectorsFirstHalf, std::max(PagesFirstHalf, PagesSecondHalf), {{0, PagesFirstHalf}, {PagesFirstHalf, PagesSecondHalf, .unixOffset = 1}});
   tester.run("Ring from half, tail no magic", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .noMagic = true}});
   tester.run("Ring from half, tail no checksum", SectorsFirstHalf, FlashStats::PageTotalSubSect, {{PagesFirstHalf, PagesSecondHalf}, {0, PagesFirstHalf - 1}, {PagesFirstHalf - 1, 1, .noChecksum = true}});
