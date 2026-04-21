@@ -55,7 +55,7 @@ struct UpTimer {
   uint32_t millisOffset = 0;
   uint32_t millisLast = 0;
 
-  uint32_t currentMillis() {
+  [[gnu::always_inline]] inline uint32_t currentMillis() {
     uint32_t const millisCurrent = millis();
 
     if (millisCurrent < millisLast) { /* overflow */
@@ -185,7 +185,7 @@ struct WiFiKeeper {
     }
   }
 
-  void maybeReconnect(uint32_t const millisCurrent) {
+  [[gnu::always_inline]] inline void maybeReconnect(uint32_t const millisCurrent) {
     if (WiFi.status() == WL_CONNECTED) {
       markConnected();
       return;
@@ -403,7 +403,7 @@ struct NtpSyncer {
     observeUnixSeconds(unixSeconds);
   }
 
-  void maybeUpdate(uint32_t const millisCurrent) {
+  [[gnu::always_inline]] inline void maybeUpdate(uint32_t const millisCurrent) {
     /* Force update if not initialized yet, or */
     if ((millisCurrent - millisLast) >= MinInterval || !init) {
       update(millisCurrent);
@@ -697,7 +697,7 @@ struct SensorHistory {
     fetchAppend(millisCurrent);
   }
 
-  void maybeFetchAppend(uint32_t const millisCurrent) {
+  [[gnu::always_inline]] inline void maybeFetchAppend(uint32_t const millisCurrent) {
     if (millisCurrent - millisLast >= MinInterval) {
       fetchAppend(millisCurrent);
     }
