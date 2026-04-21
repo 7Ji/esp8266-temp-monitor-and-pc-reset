@@ -70,15 +70,8 @@ SpiFlashOpResult spi_flash_read(size_t const offset, void *const target, size_t 
   return SPI_FLASH_RESULT_OK;
 }
 
-struct SensorHistory {
-  uint16_t countL2 = 0; /* page */
-  uint16_t headL2 = 0; /* sector */
-
 #define PRINTER Printer::
 #include "snippet/recoverFlash.h"
-};
-
-static SensorHistory history = {};
 
 struct PagePlan {
   uint16_t offset, count;
@@ -96,6 +89,9 @@ struct Tester {
   size_t total = 0;
 
   void run(char const *const title, uint16_t const head, uint16_t const count, std::vector<PagePlan> const &plans, std::vector<uint16_t> brokenSectors = {}) {
+    uint16_t recoveredCountL2 = 0; /* page */
+    uint16_t recoveredHeadL2 = 0; /* sector */
+
     memset(bufferSlices, 0xFF, bufferSlicesSize);
 
     uint64_t unixOffset = 1;
@@ -125,13 +121,13 @@ struct Tester {
     std::sort(brokenSectors.begin(), brokenSectors.end());
     brokenBufferSectors = brokenSectors;
     std::printf("%zu broken pages\n", brokenBufferSectors.size());
-    history.recoverFlash();
-    bool const cond = count == history.countL2 && head == history.headL2;
+    RecoverFlash::recoverFlash(recoveredHeadL2, recoveredCountL2);
+    bool const cond = count == recoveredCountL2 && head == recoveredHeadL2;
     pass += cond;
     ++total;
     std::printf("%s%03zu: %s: %s\n", cond ? "\033[32m" : "\033[31m", total, title, cond ? "PASS\033[0m" : "FAIL");
     if (!cond) {
-      std::printf(" - countL2 expected %hu got %hu, headL2 expected %hu got %hu\033[0m\n", count, history.countL2, head, history.headL2);
+      std::printf(" - countL2 expected %hu got %hu, headL2 expected %hu got %hu\033[0m\n", count, recoveredCountL2, head, recoveredHeadL2);
     }
   }
 

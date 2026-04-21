@@ -461,6 +461,7 @@ COMPCONST size_t const DumpHeaderSize = 16;
 
 #include "snippet/sensorSlice.h"
 #include "snippet/flashStats.h"
+#include "snippet/recoverFlash.h"
 
 struct SensorHistory {
   COMPCONST uint32_t const MinInterval = 2000;
@@ -652,7 +653,6 @@ struct SensorHistory {
     slice = slicesL2x16 + (pageID & FlashStats::PageInSectMask);
     return slice->valid() ? slice : nullptr;
   }
-#include "snippet/recoverFlash.h"
 
   void fetchAppend(uint32_t const millisCurrent) {
     struct SensorValue * value;
@@ -982,7 +982,7 @@ void setup() {
   digitalWrite(PcPinReset, LOW);
 
   Serial.begin(ConfigBaudRate);
-  history.recoverFlash();
+  RecoverFlash::recoverFlash(history.headL2, history.countL2);
 
   WiFi.setHostname(ConfigHostName);
   WiFi.setAutoReconnect(true);

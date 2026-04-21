@@ -2,25 +2,25 @@
 #ifndef PRINTER
 #define PRINTER Serial.
 #endif
-/* This is included INSIDE a C++ struct/class body; DO NOT ADD ANY HEADER INCLUSION*/
+namespace RecoverFlash {
   struct SlicesCandidate {
     uint64_t clockBegin, clockEnd;
     uint16_t head, count;
 
-    void maybeReplace(SlicesCandidate const &other) {
+    [[gnu::always_inline]] inline void maybeReplace(SlicesCandidate const &other) {
       if (other.clockEnd > clockEnd) {
         *this = other;
       }
     }
 
-    void maybeReplaceBeforeSector(SlicesCandidate &other, uint16_t const sectorID) {
+    [[gnu::always_inline]] inline void maybeReplaceBeforeSector(SlicesCandidate &other, uint16_t const sectorID) {
       if (sectorID > other.head && other.clockEnd > clockEnd) {
         other.count = (sectorID - other.head) << FlashStats::SectPageFactor;
         *this = other;
       }
     }
 
-    void init(uint16_t const sectorID) {
+    [[gnu::always_inline]] inline void init(uint16_t const sectorID) {
       head = sectorID;
       count = 0;
       clockBegin = 0;
@@ -28,7 +28,7 @@
     }
   };
 
-  void recoverSlices(SlicesCandidate &best, SlicesCandidate &current, uint16_t &sectorID, uint16_t &flashSectorID) {
+  [[gnu::always_inline]] inline void recoverSlices(SlicesCandidate &best, SlicesCandidate &current, uint16_t &sectorID, uint16_t &flashSectorID) {
     static SensorSlice const *SharedSlicesBuffer = reinterpret_cast<SensorSlice const *>(sharedBytesBuffer);
     static constexpr uint16_t WrittenBit = 0b1;
 
@@ -145,7 +145,7 @@
     best.maybeReplace(current);
   }
 
-  void recoverFlash() {
+  [[gnu::always_inline]] inline void recoverFlash(uint16_t &headL2, uint16_t &countL2) {
     uint16_t sectorID = 0, flashSectorID = FlashStats::SectStart, countFirst = 0;
     SlicesCandidate best = {}, last = {};
     uint64_t clockBeginFirst = 0;
@@ -175,3 +175,4 @@
     }
     PRINTER printf("Recovered %" PRIu16 " slices from flash, head is %" PRIu16 "\n", countL2, headL2);
   }
+}
