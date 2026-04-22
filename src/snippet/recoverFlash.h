@@ -128,7 +128,7 @@ namespace RecoverFlash {
             return;
           }
         }
-        unixLast = unixThis + slice->records[SensorSlice::MaxRecordsSub1].timestamp;
+        unixLast = unixThis + slice->records[slice->count - 1].timestamp;
       }
       current.clockEnd = unixLast; /* Only updated per sector */
       if (emptyCount) { /* With empty page in current, next shall be head */

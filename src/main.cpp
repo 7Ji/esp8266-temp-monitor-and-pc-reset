@@ -459,6 +459,78 @@ static_assert(sizeof(struct DumpRecord) == 8, "DumpRecord should have a size of 
 
 COMPCONST size_t const DumpHeaderSize = 16;
 
+struct ShadowEntry {
+  uint16_t timestamp; /* second offset from slice unixOffset */
+  SensorValue value;
+  uint8_t index;
+  uint8_t reserved;
+  uint32_t checksum;
+
+  uint32_t actualChecksum() const {
+    return crc32(this, sizeof(timestamp) + sizeof(value) + sizeof(index) + sizeof(reserved));
+  }
+
+  void finalize(uint16_t const timestampNext, SensorValue const &valueNext, uint8_t const indexNext) {
+    timestamp = timestampNext;
+    value = valueNext;
+    index = indexNext;
+    reserved = UINT8_MAX;
+    checksum = actualChecksum();
+  }
+
+  bool valid(uint8_t const expectedIndex) const {
+    return index == expectedIndex && reserved == UINT8_MAX && checksum == actualChecksum();
+  }
+};
+
+static_assert(sizeof(struct ShadowEntry) == 12, "ShadowEntry should have a size of 12");
+
+struct ShadowPage0 {
+  COMPCONST uint32_t const Magic = 0x30444853; /* SHD0 */
+  COMPCONST uint8_t const EntryCount = 20;
+
+  uint64_t unixOffset;
+  uint32_t magic;
+  uint32_t checksum;
+  ShadowEntry entries[EntryCount];
+
+  uint32_t actualChecksum() const {
+    return crc32(this, sizeof(unixOffset) + sizeof(magic));
+  }
+
+  void initialize(uint64_t const unixOffsetNext = 0) {
+    memset(this, UINT8_MAX, sizeof(*this));
+    unixOffset = unixOffsetNext;
+    magic = Magic;
+    checksum = actualChecksum();
+  }
+
+  bool validHeader() const {
+    return magic == Magic && checksum == actualChecksum();
+  }
+};
+
+static_assert(sizeof(struct ShadowPage0) == 256, "ShadowPage0 should have the same size as page");
+
+struct ShadowPage1 {
+  COMPCONST uint32_t const Magic = 0x31444853; /* SHD1 */
+  COMPCONST uint8_t const EntryCount = 21;
+
+  uint32_t magic;
+  ShadowEntry entries[EntryCount];
+
+  void initialize() {
+    memset(this, UINT8_MAX, sizeof(*this));
+    magic = Magic;
+  }
+
+  bool validHeader() const {
+    return magic == Magic;
+  }
+};
+
+static_assert(sizeof(struct ShadowPage1) == 256, "ShadowPage1 should have the same size as page");
+
 #include "snippet/sensorSlice.h"
 #include "snippet/flashStats.h"
 #include "snippet/recoverFlash.h"
@@ -466,28 +538,43 @@ COMPCONST size_t const DumpHeaderSize = 16;
 struct SensorHistory {
   COMPCONST uint32_t const MinInterval = 2000;
   COMPCONST uint8_t const MaxHistoryL0 = 1 << 5; /* 2s * 32, even secondly, for about a minute */
-
   COMPCONST uint8_t const RingMaskL0 = MaxHistoryL0 - 1;
+  COMPCONST uint8_t const ShadowSectorCount = 2;
 
   static_assert(sizeof(struct SensorSlice) == FlashStats::PageSize, "SensorSlice should have the same size as page");
 
   union {
-    SensorSlice sliceL1 = {.magic = SensorSlice::Magic};
+    SensorSlice sliceL1;
     uint32_t sliceL1Raw[sizeof(SensorSlice) / sizeof(uint32_t)];
   };
   union {
     SensorSlice slicesL2x16[FlashStats::SectPageCount];
     uint32_t slicesL2x16Raw[FlashStats::SectWordCount];
   };
+  union {
+    ShadowPage0 shadowPage0;
+    uint32_t shadowPage0Raw[FlashStats::PageWordCount];
+  };
+  union {
+    ShadowPage1 shadowPage1;
+    uint32_t shadowPage1Raw[FlashStats::PageWordCount];
+  };
   SensorValue valuesL0[MaxHistoryL0];
   uint64_t unixSecondsL0[MaxHistoryL0];
   uint32_t millisLast = 0;
   uint16_t countL2 = 0; /* page */
   uint16_t headL2 = 0; /* sector */
+  uint32_t countRecordsL2 = 0;
   uint16_t countL1 = 0;
   uint16_t sectorCachedL2 = FlashStats::SectTotal;
   uint8_t headL0 = 0;
   uint8_t countL0 = 0;
+
+  SensorHistory() {
+    sliceL1.clear();
+    shadowPage0.initialize();
+    shadowPage1.initialize();
+  }
 
   void invalidateCachedL2(uint16_t const sectorID) {
     if (sectorCachedL2 == sectorID) {
@@ -495,16 +582,280 @@ struct SensorHistory {
     }
   }
 
+  uint16_t dataSectorCapacity() const {
+    return FlashStats::SectTotal - ShadowSectorCount;
+  }
+
   uint16_t firstPage() const {
     return headL2 << FlashStats::SectPageFactor;
   }
 
+  uint16_t effectivePageCapacity() const {
+    return dataSectorCapacity() << FlashStats::SectPageFactor;
+  }
+
   uint16_t slicePage(uint16_t const sliceID) const {
-    return (firstPage() + sliceID) % FlashStats::PageTotal;
+    return (firstPage() + sliceID) % effectivePageCapacity();
+  }
+
+  uint16_t shadowSectorBase() const {
+    return dataSectorCapacity();
+  }
+
+  uint16_t shadowSectorID(uint8_t const shadowID) const {
+    return shadowSectorBase() + shadowID;
+  }
+
+  uint16_t shadowPageID(uint8_t const shadowID, uint16_t const pageOffset) const {
+    return (shadowSectorID(shadowID) << FlashStats::SectPageFactor) | (pageOffset & FlashStats::PageInSectMask);
   }
 
   uint32_t totalCount() const {
-    return uint32_t(countL2) * SensorSlice::MaxRecords + countL1 + countL0;
+    return countRecordsL2 + countL1 + countL0;
+  }
+
+  bool readPage(uint16_t const pageID, uint32_t *const raw) {
+    uint16_t const flashPageID = pageID + FlashStats::PageStart;
+    SpiFlashOpResult const opResult = spi_flash_read(flashPageID * FlashStats::PageSize, raw, FlashStats::PageSize);
+
+    if (opResult != SPI_FLASH_RESULT_OK) {
+      Serial.printf("Failed to read page %" PRIu16 "/f%" PRIu16 ", op result %d\n", pageID, flashPageID, opResult);
+      return false;
+    }
+    return true;
+  }
+
+  bool writePage(uint16_t const pageID, uint32_t *const raw, char const *const label) {
+    uint16_t const flashPageID = pageID + FlashStats::PageStart;
+    SpiFlashOpResult opResult;
+
+    invalidateCachedL2(pageID >> FlashStats::SectPageFactor);
+    Serial.printf("Writing %s to page %" PRIu16 "/f%" PRIu16 "\n", label, pageID, flashPageID);
+    opResult = spi_flash_write(flashPageID * FlashStats::PageSize, raw, FlashStats::PageSize);
+    if (opResult != SPI_FLASH_RESULT_OK) {
+      Serial.printf("Failed to write %s to page %" PRIu16 "/f%" PRIu16 ", op result %d\n", label, pageID, flashPageID, opResult);
+      return false;
+    }
+    return true;
+  }
+
+  bool erase(uint16_t const sectorID) {
+    uint16_t const flashSectorID = sectorID + FlashStats::SectStart;
+    SpiFlashOpResult opResult;
+
+    invalidateCachedL2(sectorID);
+    Serial.printf("Erasing sector %" PRIu16 "/f%" PRIu16 "\n", sectorID, flashSectorID);
+    opResult = spi_flash_erase_sector(flashSectorID);
+    if (opResult != SPI_FLASH_RESULT_OK) {
+      Serial.printf("Failed to erase sector %" PRIu16 "/f%" PRIu16 ", op result %d\n", sectorID, flashSectorID, opResult);
+      return false;
+    }
+    return true;
+  }
+
+  bool eraseShadowSectors() {
+    uint8_t shadowID;
+
+    for (shadowID = 0; shadowID < ShadowSectorCount; ++shadowID) {
+      if (!erase(shadowSectorID(shadowID))) {
+        return false;
+      }
+    }
+    shadowPage0.initialize();
+    shadowPage1.initialize();
+    return true;
+  }
+
+  bool writeL1(uint16_t const pageID) {
+    return writePage(pageID, sliceL1Raw, "L1");
+  }
+
+  void fallbackShift() {
+    Serial.println("Falling back to shift L1 by one position");
+    sliceL1.shift();
+    countL1 = sliceL1.count;
+  }
+
+  uint16_t pageOffsetL2() const {
+    return countL2 & FlashStats::PageInSectMask;
+  }
+
+  bool writeShadowHeader0() {
+    shadowPage0.initialize(sliceL1.unixOffset);
+    return writePage(shadowPageID(0, pageOffsetL2()), shadowPage0Raw, "shadow header 0");
+  }
+
+  bool writeShadowHeader1() {
+    shadowPage1.initialize();
+    return writePage(shadowPageID(1, pageOffsetL2()), shadowPage1Raw, "shadow header 1");
+  }
+
+  bool appendShadowEntry(uint8_t const index, SensorRecord const &record) {
+    if (index < ShadowPage0::EntryCount) {
+      shadowPage0.entries[index].finalize(record.timestamp, record.value, index);
+      return writePage(shadowPageID(0, pageOffsetL2()), shadowPage0Raw, "shadow page 0");
+    }
+    if (index == ShadowPage0::EntryCount && !writeShadowHeader1()) {
+      return false;
+    }
+    shadowPage1.entries[index - ShadowPage0::EntryCount].finalize(record.timestamp, record.value, index);
+    return writePage(shadowPageID(1, pageOffsetL2()), shadowPage1Raw, "shadow page 1");
+  }
+
+  uint8_t scanShadowEntries(SensorSlice &slice) {
+    uint8_t count = 0;
+
+    if (!shadowPage0.validHeader()) {
+      return 0;
+    }
+
+    slice.clear();
+    slice.unixOffset = shadowPage0.unixOffset;
+    while (count < ShadowPage0::EntryCount && shadowPage0.entries[count].valid(count)) {
+      slice.records[count].timestamp = shadowPage0.entries[count].timestamp;
+      slice.records[count].value = shadowPage0.entries[count].value;
+      ++count;
+    }
+    if (count < ShadowPage0::EntryCount || !shadowPage1.validHeader()) {
+      return count;
+    }
+    while (count < SensorSlice::MaxRecords && shadowPage1.entries[count - ShadowPage0::EntryCount].valid(count)) {
+      slice.records[count].timestamp = shadowPage1.entries[count - ShadowPage0::EntryCount].timestamp;
+      slice.records[count].value = shadowPage1.entries[count - ShadowPage0::EntryCount].value;
+      ++count;
+    }
+    return count;
+  }
+
+  bool recoverShadow() {
+    uint8_t countShadow;
+
+    if (!readPage(shadowPageID(0, pageOffsetL2()), shadowPage0Raw)) {
+      return false;
+    }
+    if (!readPage(shadowPageID(1, pageOffsetL2()), shadowPage1Raw)) {
+      return false;
+    }
+    countShadow = scanShadowEntries(sliceL1);
+    if (!countShadow) {
+      sliceL1.clear();
+      countL1 = 0;
+      return true;
+    }
+    sliceL1.finalize(countShadow);
+    countL1 = countShadow;
+    return true;
+  }
+
+  void maybeSealRecoveredL1(uint64_t const unixSeconds) {
+    if (countL1 > 0 && unixSeconds - sliceL1.unixOffset > UINT16_MAX) {
+      flushL1L2();
+    }
+  }
+
+  void appendL1(SensorValue const &valueL0, uint64_t const unixSeconds) {
+    SensorRecord recordL1 = {.value = valueL0};
+
+    if (countL1 > 0) {
+      if (unixSeconds - sliceL1.unixOffset > UINT16_MAX) {
+        Serial.printf("Sealing partial L1 with too-wide timestamp delta %" PRIu64 "\n", unixSeconds - sliceL1.unixOffset);
+        flushL1L2();
+      }
+    }
+
+    if (countL1 == 0) {
+      sliceL1.clear();
+      sliceL1.unixOffset = unixSeconds;
+      recordL1.timestamp = 0;
+      if (!writeShadowHeader0()) {
+        return;
+      }
+    } else {
+      recordL1.timestamp = unixSeconds - sliceL1.unixOffset;
+    }
+    if (!appendShadowEntry(countL1, recordL1)) {
+      return;
+    }
+    sliceL1.records[countL1++] = recordL1;
+    sliceL1.count = countL1;
+  }
+
+  void flushL1L2() {
+    uint16_t const pageID = slicePage(countL2);
+    bool const afterBoundary = pageID & FlashStats::PageInSectMask;
+    SensorSlice *sliceDropped;
+
+    if (!countL1) {
+      return;
+    }
+
+    Serial.printf("Flushing L1 to L2 flash page %" PRIu16 "\n", pageID);
+
+    if (!afterBoundary) {
+      if (countL2 >= effectivePageCapacity()) {
+        sliceDropped = fetchSliceL2(firstPage());
+        if (sliceDropped != nullptr) {
+          countRecordsL2 -= sliceDropped->count;
+        }
+        headL2 = (headL2 + 1) % dataSectorCapacity();
+        countL2 = effectivePageCapacity() - 1;
+      }
+      if (!erase(pageID >> FlashStats::SectPageFactor)) {
+        fallbackShift();
+        return;
+      }
+    }
+
+    sliceL1.finalize(countL1);
+    if (!writeL1(pageID)) {
+      fallbackShift();
+      return;
+    }
+    countRecordsL2 += countL1;
+    countL1 = 0;
+    sliceL1.clear();
+    ++countL2;
+    eraseShadowSectors();
+  }
+
+  bool fetchSector(uint16_t const sectorID) {
+    SpiFlashOpResult opResult;
+    uint16_t const flashSectorID = sectorID + FlashStats::SectStart;
+
+    if (sectorCachedL2 == sectorID) {
+      return true;
+    }
+
+    opResult = spi_flash_read(flashSectorID << FlashStats::SectExp, slicesL2x16Raw, FlashStats::SectSize);
+    if (opResult != SPI_FLASH_RESULT_OK) {
+      Serial.printf("fetch sector %" PRIu16 "/f%" PRIu16 ": Read not OK, op result %d\n", sectorID, flashSectorID, opResult);
+      return false;
+    }
+    sectorCachedL2 = sectorID;
+    return true;
+  }
+
+  SensorSlice *fetchSliceL2(uint16_t const pageID) {
+    SensorSlice *slice;
+
+    if (!fetchSector(pageID >> FlashStats::SectPageFactor)) {
+      return nullptr;
+    }
+    slice = slicesL2x16 + (pageID & FlashStats::PageInSectMask);
+    return slice->valid() ? slice : nullptr;
+  }
+
+  void rebuildCountRecordsL2() {
+    uint16_t pageIndex;
+    SensorSlice *slice;
+
+    countRecordsL2 = 0;
+    for (pageIndex = 0; pageIndex < countL2; ++pageIndex) {
+      slice = fetchSliceL2(slicePage(pageIndex));
+      if (slice != nullptr) {
+        countRecordsL2 += slice->count;
+      }
+    }
   }
 
   SensorValue &first() {
@@ -545,117 +896,8 @@ struct SensorHistory {
     return valuesL0[recordID];
   }
 
-  bool erase(uint16_t const sectorID) {
-    uint16_t const flashSectorID = sectorID + FlashStats::SectStart;
-    SpiFlashOpResult opResult;
-
-    invalidateCachedL2(sectorID);
-    Serial.printf("Erasing sector %" PRIu16 "/f%" PRIu16 "\n", sectorID, flashSectorID);
-    opResult = spi_flash_erase_sector(flashSectorID);
-    if (opResult != SPI_FLASH_RESULT_OK) {
-      Serial.printf("Failed to erase sector %" PRIu16 "/f%" PRIu16 ", op result %d\n", sectorID, flashSectorID, opResult);
-      return false;
-    }
-    return true;
-  }
-
-  bool writeL1(uint16_t const pageID) {
-    uint16_t const flashPageID = pageID + FlashStats::PageStart;
-    SpiFlashOpResult opResult;
-
-    invalidateCachedL2(pageID >> FlashStats::SectPageFactor);
-    Serial.printf("Writing L1 to page %" PRIu16 "/f%" PRIu16 "\n", pageID, flashPageID);
-    opResult = spi_flash_write(flashPageID * FlashStats::PageSize, sliceL1Raw, FlashStats::PageSize);
-    if (opResult != SPI_FLASH_RESULT_OK) {
-      Serial.printf("Failed to write L1 to page %" PRIu16 "/f%" PRIu16 ", op result %d\n", pageID, flashPageID, opResult);
-      return false;
-    }
-    return true;
-  }
-
-  void fallbackShift() {
-    Serial.println("Falling back to shift L1 by one position");
-    sliceL1.shift();
-    countL1 = SensorSlice::MaxRecordsSub1;
-  }
-
-  void appendL1(SensorValue const &valueL0, uint64_t const unixSeconds) {
-    uint64_t diff64;
-    SensorRecord recordL1 = {.value = valueL0};
-
-    if (countL1 > 0) {
-      /* Unlikely to happen, but just in case */
-      diff64 = unixSeconds - sliceL1.unixOffset;
-      if (diff64 > UINT16_MAX) {
-        Serial.printf("Dropping partial L1 with too-wide timestamp delta %" PRIu64 "\n", diff64);
-        countL1 = 0;
-      }
-    }
-
-    if (countL1 == 0) {
-      sliceL1.unixOffset = unixSeconds;
-      recordL1.timestamp = 0;
-    } else {
-      recordL1.timestamp = unixSeconds - sliceL1.unixOffset;
-    }
-    sliceL1.records[countL1++] = recordL1;
-  }
-
-  void flushL1L2() {
-    uint16_t const pageID = slicePage(countL2);
-    bool const afterBoundary = pageID & FlashStats::PageInSectMask;
-
-    Serial.printf("Flushing L1 to L2 flash page %" PRIu16 "\n", pageID);
-
-    if (!afterBoundary) {
-      /* Whether we successfully erase the sector or not, consider pages on it bad */
-      if (countL2 > FlashStats::PageTotalSubSect) { /* Technically this could only be countL2 == FlashStats::PageTotal, but do this securely */
-        headL2 = (headL2 + 1) % FlashStats::SectTotal;
-        countL2 = FlashStats::PageTotalSubSect;
-      }
-      if (!erase(pageID >> FlashStats::SectPageFactor)) {
-        fallbackShift();
-        return;
-      }
-    }
-    sliceL1.checksum = sliceL1.actualChecksum();
-    if (!writeL1(pageID)) {
-      fallbackShift();
-      return;
-    }
-    countL1 = 0;
-    ++countL2;
-  }
-
-  bool fetchSector(uint16_t const sectorID) {
-    SpiFlashOpResult opResult;
-    uint16_t const flashSectorID = sectorID + FlashStats::SectStart;
-
-    if (sectorCachedL2 == sectorID) {
-      return true;
-    }
-
-    opResult = spi_flash_read(flashSectorID << FlashStats::SectExp, slicesL2x16Raw, FlashStats::SectSize);
-    if (opResult != SPI_FLASH_RESULT_OK) {
-      Serial.printf("fetch sector %" PRIu16 "/f%" PRIu16 ": Read not OK, op result %d\n", sectorID, flashSectorID, opResult);
-      return false;
-    }
-    sectorCachedL2 = sectorID;
-    return true;
-  }
-
-  SensorSlice *fetchSliceL2(uint16_t const pageID) {
-    SensorSlice *slice;
-
-    if (!fetchSector(pageID >> FlashStats::SectPageFactor)) {
-      return nullptr;
-    }
-    slice = slicesL2x16 + (pageID & FlashStats::PageInSectMask);
-    return slice->valid() ? slice : nullptr;
-  }
-
   void fetchAppend(uint32_t const millisCurrent) {
-    struct SensorValue * value;
+    struct SensorValue *value;
     uint16_t current;
     uint64_t unixSeconds;
 
@@ -680,6 +922,7 @@ struct SensorHistory {
 
     millisLast = millisCurrent;
     unixSeconds = ntpSyncer.currentUnixSeconds(millisCurrent);
+    maybeSealRecoveredL1(unixSeconds);
     unixSecondsL0[current] = unixSeconds;
     value->humidInt = dht.data[0];
     value->humidDot = dht.data[1];
@@ -690,9 +933,12 @@ struct SensorHistory {
   void firstFetchAppend(uint32_t const millisCurrent) {
     SensorSlice *slice;
 
+    millisLast = millisCurrent;
     if (countL2 > 0 && (slice = fetchSliceL2(slicePage(countL2 - 1))) != nullptr) {
-      ntpSyncer.ensureUnixSeconds(millisCurrent, slice->unixOffset + slice->records[SensorSlice::MaxRecordsSub1].timestamp);
+      ntpSyncer.ensureUnixSeconds(millisCurrent, slice->unixOffset + slice->records[slice->count - 1].timestamp);
     }
+    rebuildCountRecordsL2();
+    recoverShadow();
     dht.begin();
     fetchAppend(millisCurrent);
   }
@@ -837,7 +1083,7 @@ struct AllSender {
     }
     for (pageID = 0, slice = history.slicesL2x16; pageID < count; ++pageID, ++slice) {
       if (slice->valid()) {
-        sendSlice(*slice);
+        sendSlice(*slice, slice->count);
       }
     }
   }
