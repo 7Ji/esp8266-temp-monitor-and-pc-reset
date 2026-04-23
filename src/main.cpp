@@ -450,15 +450,6 @@ struct SensorRecord {
 
 static_assert(sizeof(struct SensorRecord) == 6, "SensorRecord should have a size of 6");
 
-struct DumpRecord {
-  uint32_t timestamp;
-  SensorValue value;
-};
-
-static_assert(sizeof(struct DumpRecord) == 8, "DumpRecord should have a size of 8");
-
-COMPCONST size_t const DumpHeaderSize = 16;
-
 #include "snippet/sensorPage.h"
 #include "snippet/flashStats.h"
 #include "snippet/recoverFlash.h"
@@ -531,6 +522,18 @@ struct SensorHistory {
     } else {
       unixSeconds = unixSecondsL0[headL0];
       return valuesL0[headL0];
+    }
+  }
+
+  uint64_t firstUnixSeconds() {
+    SensorPage *page;
+
+    if (countL2 > 0 && (page = fetchPageL2(firstPage())) != nullptr) {
+      return page->unixOffset + page->records[0].timestamp;
+    } else if (countL1 > 0) {
+      return pageL1.unixOffset + pageL1.records[0].timestamp;
+    } else {
+      return unixSecondsL0[headL0];
     }
   }
 
@@ -858,6 +861,7 @@ struct AllSender {
         for (sectorID = sectorOffset; sectorID < sectorOffset + sectorCountFirst; ++sectorID) {
           sendSector(sectorID, FlashStats::SectPageCount);
         }
+        sectorOffset += sectorCountFirst;
         sectorCount -= sectorCountFirst;
       }
       for (sectorID = 0; sectorID < sectorCount; ++sectorID) {
@@ -875,11 +879,12 @@ struct AllSender {
     }
   }
 
-  void flushBuffered() {
+  ~AllSender() {
     if (each.offset) {
       server.sendContent(sharedStrBuffer, each.offset);
       each.offset = 0;
     }
+    server.sendContent("", 0);
   }
 };
 
@@ -911,31 +916,30 @@ void httpHandleHistory() {
   AllSender<HistoryEach> sender = {};
 
   sender.sendAll();
-  sender.flushBuffered();
-  server.sendContent("", 0);
 }
+
+struct DumpRecord {
+  uint32_t timestamp;
+  SensorValue value;
+};
+
+static_assert(sizeof(struct DumpRecord) == 8, "DumpRecord should have a size of 8");
 
 struct DumpEach {
   COMPCONST size_t const lenMax = SharedBufferSize - sizeof(DumpRecord);
+  COMPCONST uint32_t const Magic = 0x01323845; /* E82\1 */
 
-  uint64_t unixOffset = 0;
+  uint64_t unixOffset = history.firstUnixSeconds();
   size_t offset = 0;
 
   DumpEach() {
-    uint32_t const totalCount = history.totalCount();
-
-    server.setContentLength(DumpHeaderSize + totalCount * sizeof(DumpRecord));
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
 #ifdef PRIVATE_ALLOW_CROSS
     serverSendHeadersForRaw();
 #endif
-    if (totalCount > 0) {
-      history.first(unixOffset);
-    }
-    memcpy(sharedBytesBuffer, "E82\1", 4); /* Magic "E82", dump format version 1 */
-    memcpy(sharedBytesBuffer + 4, &totalCount, sizeof(totalCount));
-    memcpy(sharedBytesBuffer + 8, &unixOffset, sizeof(unixOffset));
-    server.send(200, "application/octet-stream", "", 0);
-    server.sendContent(sharedStrBuffer, DumpHeaderSize);
+    *sharedWordsBuffer = Magic;
+    memcpy(sharedWordsBuffer + 1, &unixOffset, sizeof(unixOffset));
+    server.send(200, "application/octet-stream", sharedBytesBuffer, sizeof(Magic) + sizeof(unixOffset));
   }
 
   void sendValue(uint64_t const unixSeconds, SensorValue const &value) {
@@ -954,7 +958,6 @@ void httpHandleDump() {
   AllSender<DumpEach> sender = {};
 
   sender.sendAll();
-  sender.flushBuffered();
 }
 
 void httpHandleRecent() {

@@ -103,13 +103,12 @@ If a sector read fails, a written page is invalid, a non-empty page appears afte
 The `/dump` route returns all available history as `application/octet-stream`. Multi-byte integer fields are little-endian.
 
 ```text
-dump_header[16]
+dump_header[12]
   0x00..0x02  magic       "E82" (bytes 0x45 0x38 0x32)
   0x03        version     u8, currently 1
-  0x04..0x07  count       u32le, number of records following the header
-  0x08..0x0f  unixOffset  u64le, base Unix timestamp in seconds
+  0x04..0x0b  unixOffset  u64le, base Unix timestamp in seconds
 
-dump_record[8] repeated count times
+dump_record[8] repeated
   0x00..0x03  timestamp   u32le, seconds after header unixOffset
   0x04        tempInt     i8, integer part of temperature in Celsius
   0x05        tempDot     u8, first decimal digit of temperature
@@ -117,7 +116,7 @@ dump_record[8] repeated count times
   0x07        humidDot    u8, first decimal digit of relative humidity
 ```
 
-The absolute Unix timestamp for each record is `header.unixOffset + record.timestamp`. The temperature value is `tempInt + tempDot / 10`; the humidity value is `humidInt + humidDot / 10`. Consumers should reject dumps shorter than 16 bytes, dumps with unsupported magic or version, and dumps whose byte length is not exactly `16 + count * 8`.
+The absolute Unix timestamp for each record is `header.unixOffset + record.timestamp`. The temperature value is `tempInt + tempDot / 10`; the humidity value is `humidInt + humidDot / 10`. Consumers should reject dumps shorter than 12 bytes and dumps with unsupported magic or version.
 
 ## Web Interface and API
 

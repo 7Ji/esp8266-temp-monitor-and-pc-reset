@@ -273,7 +273,7 @@
 
     function parseDump(buffer) {
       const view = new DataView(buffer);
-      const headerSize = 16;
+      const headerSize = 12;
       const recordSize = 8;
 
       if (buffer.byteLength < headerSize) {
@@ -290,16 +290,17 @@
         throw new Error('Unsupported dump version ' + view.getUint8(3));
       }
 
-      const count = view.getUint32(4, true);
-      const unixOffset = Number(view.getBigUint64(8, true));
-      const expectedLength = headerSize + count * recordSize;
+      const unixOffset = Number(view.getBigUint64(4, true));
 
-      if (buffer.byteLength !== expectedLength) {
-        throw new Error('Bad dump length ' + buffer.byteLength + ' != ' + expectedLength);
+      if (buffer.byteLength < headerSize) {
+        throw new Error('Bad dump length ' + buffer.byteLength + ' < ' + headerSize);
       }
 
       const entries = [];
-      for (let offset = headerSize; offset < expectedLength; offset += recordSize) {
+      for (let offset = headerSize; offset < buffer.byteLength; offset += recordSize) {
+        if (offset + recordSize > buffer.byteLength) {
+          break;
+        }
         entries.push({
           timestamp: unixOffset + view.getUint32(offset, true),
           temperature: view.getInt8(offset + 4) + view.getUint8(offset + 5) / 10,
