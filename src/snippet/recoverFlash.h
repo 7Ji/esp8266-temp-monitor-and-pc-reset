@@ -3,17 +3,17 @@
 #define PRINTER Serial.
 #endif
 namespace RecoverFlash {
-  struct SlicesCandidate {
+  struct PagesCandidate {
     uint64_t clockBegin, clockEnd;
     uint16_t head, count;
 
-    [[gnu::always_inline]] inline void maybeReplace(SlicesCandidate const &other) {
+    [[gnu::always_inline]] inline void maybeReplace(PagesCandidate const &other) {
       if (other.clockEnd > clockEnd) {
         *this = other;
       }
     }
 
-    [[gnu::always_inline]] inline void maybeReplaceBeforeSector(SlicesCandidate &other, uint16_t const sectorID) {
+    [[gnu::always_inline]] inline void maybeReplaceBeforeSector(PagesCandidate &other, uint16_t const sectorID) {
       if (sectorID > other.head && other.clockEnd > clockEnd) {
         other.count = (sectorID - other.head) << FlashStats::SectPageFactor;
         *this = other;
@@ -28,16 +28,16 @@ namespace RecoverFlash {
     }
   };
 
-  [[gnu::always_inline]] inline void recoverSlices(SlicesCandidate &best, SlicesCandidate &current, uint16_t &sectorID, uint16_t &flashSectorID) {
-    static SensorSlice const *SharedSlicesBuffer = reinterpret_cast<SensorSlice const *>(sharedBytesBuffer);
+  [[gnu::always_inline]] inline void recoverPages(PagesCandidate &best, PagesCandidate &current, uint16_t &sectorID, uint16_t &flashSectorID) {
+    static SensorPage const *SharedPagesBuffer = reinterpret_cast<SensorPage const *>(sharedBytesBuffer);
     static constexpr uint16_t WrittenBit = 0b1;
 
-    SensorSlice const *slice;
+    SensorPage const *page;
     SpiFlashOpResult opResult;
     uint64_t unixThis, unixLast = 0;
     uint32_t *pageWordsBuffer;
     uint16_t pageID, flashPageID, writtenMask;
-    uint8_t sectorPageID, pageWordID, emptyCount, *sliceRaw;
+    uint8_t sectorPageID, pageWordID, emptyCount;
     current.init(sectorID);
 
     for (
@@ -85,16 +85,14 @@ namespace RecoverFlash {
         pageID = sectorID << FlashStats::SectPageFactor,
         flashPageID = flashSectorID << FlashStats::SectPageFactor,
         emptyCount = 0,
-        slice = SharedSlicesBuffer,
-        sliceRaw = sharedBytesBuffer;
+        page = SharedPagesBuffer;
 
         sectorPageID < FlashStats::SectPageCount;
 
         ++sectorPageID,
         ++pageID,
         ++flashPageID,
-        ++slice,
-        sliceRaw += FlashStats::PageSize
+        ++page
       ) {
         if (!(writtenMask & (WrittenBit << sectorPageID))) {
           ++emptyCount;
@@ -106,13 +104,13 @@ namespace RecoverFlash {
           ++flashSectorID;
           return;
         }
-        if (!slice->valid()) { /* Invalid page */
+        if (!page->valid()) { /* Invalid page */
           PRINTER printf("Invalid page %" PRIu16 "/f%" PRIu16 "\n", pageID, flashPageID);
           best.maybeReplaceBeforeSector(current, sectorID++);
           ++flashSectorID;
           return;
         }
-        unixThis = slice->unixOffset;
+        unixThis = page->unixOffset;
         if (!current.clockBegin) {
           current.clockBegin = unixThis;
         }
@@ -123,12 +121,12 @@ namespace RecoverFlash {
             ++flashSectorID;
             return;
           } else { /* First page in sector, this is head of second part */
-            PRINTER printf("Page %" PRIu16 "/f%" PRIu16 " jump back and it's the first page in sector, consider this sector as head of next chain of slices\n", pageID, flashPageID);
+            PRINTER printf("Page %" PRIu16 "/f%" PRIu16 " jump back and it's the first page in sector, consider this sector as head of next chain of pages\n", pageID, flashPageID);
             best.maybeReplaceBeforeSector(current, sectorID);
             return;
           }
         }
-        unixLast = unixThis + slice->records[SensorSlice::MaxRecordsSub1].timestamp;
+        unixLast = unixThis + page->records[SensorPage::MaxRecordsSub1].timestamp;
       }
       current.clockEnd = unixLast; /* Only updated per sector */
       if (emptyCount) { /* With empty page in current, next shall be head */
@@ -147,19 +145,19 @@ namespace RecoverFlash {
 
   [[gnu::always_inline]] inline void recoverFlash(uint16_t &headL2, uint16_t &countL2) {
     uint16_t sectorID = 0, flashSectorID = FlashStats::SectStart, countFirst = 0;
-    SlicesCandidate best = {}, last = {};
+    PagesCandidate best = {}, last = {};
     uint64_t clockBeginFirst = 0;
 
     PRINTER println("Recovering on-flash records...");
 
-    /* The slices at head is special, they could be the tail-wrapped-around part of a ring */
-    recoverSlices(best, last, sectorID, flashSectorID);
+    /* The pages at head are special, they could be the tail-wrapped-around part of a ring */
+    recoverPages(best, last, sectorID, flashSectorID);
     if (best.count) {
       countFirst = best.count;
       clockBeginFirst = best.clockBegin;
     }
     while (sectorID < FlashStats::SectTotal) {
-      recoverSlices(best, last, sectorID, flashSectorID);
+      recoverPages(best, last, sectorID, flashSectorID);
     }
     /* Head and tail candidates may be two halves of one wrapped ring */
     if (!best.head &&
@@ -173,6 +171,6 @@ namespace RecoverFlash {
       headL2 = best.head;
       countL2 = best.count;
     }
-    PRINTER printf("Recovered %" PRIu16 " slices from flash, head is %" PRIu16 "\n", countL2, headL2);
+    PRINTER printf("Recovered %" PRIu16 " pages from flash, head is %" PRIu16 "\n", countL2, headL2);
   }
 }

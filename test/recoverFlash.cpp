@@ -51,11 +51,11 @@ static uint32_t crc32 (void const* const data, size_t length, uint32_t crc = 0xf
 }
 
 #define PRINTER Printer::
-#include "snippet/sensorSlice.h"
+#include "snippet/sensorPage.h"
 
 static uint8_t buffer[FlashStats::AddrEnd];
-static void *const bufferSlices = buffer + FlashStats::AddrStart;
-static SensorSlice *const slicesAll = reinterpret_cast<SensorSlice *>(bufferSlices);
+static void *const bufferPages = buffer + FlashStats::AddrStart;
+static SensorPage *const pagesAll = reinterpret_cast<SensorPage *>(bufferPages);
 
 static std::vector<uint16_t> NoBrokenBufferSectors = {};
 static std::vector<uint16_t> &brokenBufferSectors = NoBrokenBufferSectors;
@@ -83,7 +83,7 @@ struct PagePlan {
 };
 
 struct Tester {
-  static uint32_t const bufferSlicesSize = FlashStats::AddrEnd - FlashStats::AddrStart;
+  static uint32_t const bufferPagesSize = FlashStats::AddrEnd - FlashStats::AddrStart;
 
   size_t pass = 0;
   size_t total = 0;
@@ -92,29 +92,29 @@ struct Tester {
     uint16_t recoveredCountL2 = 0; /* page */
     uint16_t recoveredHeadL2 = 0; /* sector */
 
-    memset(bufferSlices, 0xFF, bufferSlicesSize);
+    memset(bufferPages, 0xFF, bufferPagesSize);
 
     uint64_t unixOffset = 1;
     for (PagePlan const &plan: plans) {
-      SensorSlice *const slices = slicesAll + plan.offset;
+      SensorPage *const pages = pagesAll + plan.offset;
       if (plan.unixOffset) {
         unixOffset = plan.unixOffset;
       }
       for (auto i = 0; i < plan.count; ++i) {
-        SensorSlice *slice = slices + i;
-        slice->magic = plan.noMagic ? 0 : slice->Magic;
-        slice->unixOffset = unixOffset;
-        memset(slice->records, 9, sizeof(slice->records)); /* temp 9.9, humid 9.9 */
-        for (auto j = 0; j < SensorSlice::MaxRecords; ++j) {
-          slice->records[j].timestamp = j;
+        SensorPage *page = pages + i;
+        page->magic = plan.noMagic ? 0 : page->Magic;
+        page->unixOffset = unixOffset;
+        memset(page->records, 9, sizeof(page->records)); /* temp 9.9, humid 9.9 */
+        for (auto j = 0; j < SensorPage::MaxRecords; ++j) {
+          page->records[j].timestamp = j;
         }
         if (plan.nonZeroTimestamp) {
-          slice->records[0].timestamp = 1;
+          page->records[0].timestamp = 1;
         }
         if (plan.lastRecordNotIncreasing) {
-          slice->records[SensorSlice::MaxRecordsSub1].timestamp = slice->records[SensorSlice::MaxRecordsSub1 - 1].timestamp;
+          page->records[SensorPage::MaxRecordsSub1].timestamp = page->records[SensorPage::MaxRecordsSub1 - 1].timestamp;
         }
-        slice->checksum = plan.noChecksum ? 0 : slice->actualChecksum();
+        page->checksum = plan.noChecksum ? 0 : page->actualChecksum();
         unixOffset += 3600;
       }
     }

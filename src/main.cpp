@@ -444,7 +444,7 @@ struct SensorValue {
 static_assert(sizeof(struct SensorValue) == 4, "SensorValue should have a size of 4");
 
 struct SensorRecord {
-  uint16_t timestamp; /* second offset from slice unixOffset */
+  uint16_t timestamp; /* second offset from page unixOffset */
   SensorValue value;
 };
 
@@ -459,7 +459,7 @@ static_assert(sizeof(struct DumpRecord) == 8, "DumpRecord should have a size of 
 
 COMPCONST size_t const DumpHeaderSize = 16;
 
-#include "snippet/sensorSlice.h"
+#include "snippet/sensorPage.h"
 #include "snippet/flashStats.h"
 #include "snippet/recoverFlash.h"
 
@@ -469,15 +469,15 @@ struct SensorHistory {
 
   COMPCONST uint8_t const RingMaskL0 = MaxHistoryL0 - 1;
 
-  static_assert(sizeof(struct SensorSlice) == FlashStats::PageSize, "SensorSlice should have the same size as page");
+  static_assert(sizeof(struct SensorPage) == FlashStats::PageSize, "SensorPage should have the same size as page");
 
   union {
-    SensorSlice sliceL1 = {.magic = SensorSlice::Magic};
-    uint32_t sliceL1Raw[sizeof(SensorSlice) / sizeof(uint32_t)];
+    SensorPage pageL1 = {.magic = SensorPage::Magic};
+    uint32_t pageL1Raw[sizeof(SensorPage) / sizeof(uint32_t)];
   };
   union {
-    SensorSlice slicesL2x16[FlashStats::SectPageCount];
-    uint32_t slicesL2x16Raw[FlashStats::SectWordCount];
+    SensorPage pagesL2x16[FlashStats::SectPageCount];
+    uint32_t pagesL2x16Raw[FlashStats::SectWordCount];
   };
   SensorValue valuesL0[MaxHistoryL0];
   uint64_t unixSecondsL0[MaxHistoryL0];
@@ -499,35 +499,35 @@ struct SensorHistory {
     return headL2 << FlashStats::SectPageFactor;
   }
 
-  uint16_t slicePage(uint16_t const sliceID) const {
-    return (firstPage() + sliceID) % FlashStats::PageTotal;
+  uint16_t historyPage(uint16_t const pageID) const {
+    return (firstPage() + pageID) % FlashStats::PageTotal;
   }
 
   uint32_t totalCount() const {
-    return uint32_t(countL2) * SensorSlice::MaxRecords + countL1 + countL0;
+    return uint32_t(countL2) * SensorPage::MaxRecords + countL1 + countL0;
   }
 
   SensorValue &first() {
-    SensorSlice *slice;
+    SensorPage *page;
 
-    if (countL2 > 0 && (slice = fetchSliceL2(firstPage())) != nullptr) {
-      return slice->records[0].value;
+    if (countL2 > 0 && (page = fetchPageL2(firstPage())) != nullptr) {
+      return page->records[0].value;
     } else if (countL1 > 0) {
-      return sliceL1.records[0].value;
+      return pageL1.records[0].value;
     } else {
       return valuesL0[headL0];
     }
   }
 
   SensorValue &first(uint64_t &unixSeconds) {
-    SensorSlice *slice;
+    SensorPage *page;
 
-    if (countL2 > 0 && (slice = fetchSliceL2(firstPage())) != nullptr) {
-      unixSeconds = slice->unixOffset + slice->records[0].timestamp;
-      return slice->records[0].value;
+    if (countL2 > 0 && (page = fetchPageL2(firstPage())) != nullptr) {
+      unixSeconds = page->unixOffset + page->records[0].timestamp;
+      return page->records[0].value;
     } else if (countL1 > 0) {
-      unixSeconds = sliceL1.unixOffset + sliceL1.records[0].timestamp;
-      return sliceL1.records[0].value;
+      unixSeconds = pageL1.unixOffset + pageL1.records[0].timestamp;
+      return pageL1.records[0].value;
     } else {
       unixSeconds = unixSecondsL0[headL0];
       return valuesL0[headL0];
@@ -565,7 +565,7 @@ struct SensorHistory {
 
     invalidateCachedL2(pageID >> FlashStats::SectPageFactor);
     Serial.printf("Writing L1 to page %" PRIu16 "/f%" PRIu16 "\n", pageID, flashPageID);
-    opResult = spi_flash_write(flashPageID * FlashStats::PageSize, sliceL1Raw, FlashStats::PageSize);
+    opResult = spi_flash_write(flashPageID * FlashStats::PageSize, pageL1Raw, FlashStats::PageSize);
     if (opResult != SPI_FLASH_RESULT_OK) {
       Serial.printf("Failed to write L1 to page %" PRIu16 "/f%" PRIu16 ", op result %d\n", pageID, flashPageID, opResult);
       return false;
@@ -575,8 +575,8 @@ struct SensorHistory {
 
   void fallbackShift() {
     Serial.println("Falling back to shift L1 by one position");
-    sliceL1.shift();
-    countL1 = SensorSlice::MaxRecordsSub1;
+    pageL1.shift();
+    countL1 = SensorPage::MaxRecordsSub1;
   }
 
   void appendL1(SensorValue const &valueL0, uint64_t const unixSeconds) {
@@ -585,7 +585,7 @@ struct SensorHistory {
 
     if (countL1 > 0) {
       /* Unlikely to happen, but just in case */
-      diff64 = unixSeconds - sliceL1.unixOffset;
+      diff64 = unixSeconds - pageL1.unixOffset;
       if (diff64 > UINT16_MAX) {
         Serial.printf("Dropping partial L1 with too-wide timestamp delta %" PRIu64 "\n", diff64);
         countL1 = 0;
@@ -593,16 +593,16 @@ struct SensorHistory {
     }
 
     if (countL1 == 0) {
-      sliceL1.unixOffset = unixSeconds;
+      pageL1.unixOffset = unixSeconds;
       recordL1.timestamp = 0;
     } else {
-      recordL1.timestamp = unixSeconds - sliceL1.unixOffset;
+      recordL1.timestamp = unixSeconds - pageL1.unixOffset;
     }
-    sliceL1.records[countL1++] = recordL1;
+    pageL1.records[countL1++] = recordL1;
   }
 
   void flushL1L2() {
-    uint16_t const pageID = slicePage(countL2);
+    uint16_t const pageID = historyPage(countL2);
     bool const afterBoundary = pageID & FlashStats::PageInSectMask;
 
     Serial.printf("Flushing L1 to L2 flash page %" PRIu16 "\n", pageID);
@@ -618,7 +618,7 @@ struct SensorHistory {
         return;
       }
     }
-    sliceL1.checksum = sliceL1.actualChecksum();
+    pageL1.checksum = pageL1.actualChecksum();
     if (!writeL1(pageID)) {
       fallbackShift();
       return;
@@ -635,7 +635,7 @@ struct SensorHistory {
       return true;
     }
 
-    opResult = spi_flash_read(flashSectorID << FlashStats::SectExp, slicesL2x16Raw, FlashStats::SectSize);
+    opResult = spi_flash_read(flashSectorID << FlashStats::SectExp, pagesL2x16Raw, FlashStats::SectSize);
     if (opResult != SPI_FLASH_RESULT_OK) {
       Serial.printf("fetch sector %" PRIu16 "/f%" PRIu16 ": Read not OK, op result %d\n", sectorID, flashSectorID, opResult);
       return false;
@@ -644,14 +644,14 @@ struct SensorHistory {
     return true;
   }
 
-  SensorSlice *fetchSliceL2(uint16_t const pageID) {
-    SensorSlice *slice;
+  SensorPage *fetchPageL2(uint16_t const pageID) {
+    SensorPage *page;
 
     if (!fetchSector(pageID >> FlashStats::SectPageFactor)) {
       return nullptr;
     }
-    slice = slicesL2x16 + (pageID & FlashStats::PageInSectMask);
-    return slice->valid() ? slice : nullptr;
+    page = pagesL2x16 + (pageID & FlashStats::PageInSectMask);
+    return page->valid() ? page : nullptr;
   }
 
   void fetchAppend(uint32_t const millisCurrent) {
@@ -665,7 +665,7 @@ struct SensorHistory {
 
     if (countL0 == MaxHistoryL0) {
       if (!headL0) {
-        if (countL1 == SensorSlice::MaxRecords) {
+        if (countL1 == SensorPage::MaxRecords) {
           flushL1L2();
         }
         appendL1(valuesL0[0], unixSecondsL0[0]);
@@ -688,10 +688,10 @@ struct SensorHistory {
   }
 
   void firstFetchAppend(uint32_t const millisCurrent) {
-    SensorSlice *slice;
+    SensorPage *page;
 
-    if (countL2 > 0 && (slice = fetchSliceL2(slicePage(countL2 - 1))) != nullptr) {
-      ntpSyncer.ensureUnixSeconds(millisCurrent, slice->unixOffset + slice->records[SensorSlice::MaxRecordsSub1].timestamp);
+    if (countL2 > 0 && (page = fetchPageL2(historyPage(countL2 - 1))) != nullptr) {
+      ntpSyncer.ensureUnixSeconds(millisCurrent, page->unixOffset + page->records[SensorPage::MaxRecordsSub1].timestamp);
     }
     dht.begin();
     fetchAppend(millisCurrent);
@@ -817,27 +817,27 @@ struct AllSender {
     }
   }
 
-  void sendSlice(SensorSlice const &slice, uint16_t const count = SensorSlice::MaxRecords) {
-    uint64_t const sliceUnixOffset = slice.unixOffset;
+  void sendPage(SensorPage const &page, uint16_t const count = SensorPage::MaxRecords) {
+    uint64_t const pageUnixOffset = page.unixOffset;
     SensorRecord const *record;
     uint16_t i;
 
     for (i = 0; i < count; ++i) {
-      record = slice.records + i;
-      each.sendValue(sliceUnixOffset + record->timestamp, record->value);
+      record = page.records + i;
+      each.sendValue(pageUnixOffset + record->timestamp, record->value);
     }
   }
 
   void sendSector(uint16_t const sectorID, uint8_t const count) {
-    SensorSlice *slice;
+    SensorPage *page;
     uint8_t pageID;
 
     if (!history.fetchSector(sectorID)) {
       return;
     }
-    for (pageID = 0, slice = history.slicesL2x16; pageID < count; ++pageID, ++slice) {
-      if (slice->valid()) {
-        sendSlice(*slice);
+    for (pageID = 0, page = history.pagesL2x16; pageID < count; ++pageID, ++page) {
+      if (page->valid()) {
+        sendPage(*page);
       }
     }
   }
@@ -868,7 +868,7 @@ struct AllSender {
       }
     }
     if (history.countL1 > 0) {
-      sendSlice(history.sliceL1, history.countL1);
+      sendPage(history.pageL1, history.countL1);
     }
     if (history.countL0 > 0) {
       sendRingRecords();

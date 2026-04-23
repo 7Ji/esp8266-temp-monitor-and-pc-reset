@@ -63,8 +63,8 @@ The hostname, WiFi SSID, WiFi password, pins and auth token are hardcoded in fir
 
 - `L0`: RAM ring, 32 sensor values sampled every 2 seconds, covering about 64 seconds.
 - `L0` also keeps a parallel absolute `unixSeconds` array in RAM so each live sample carries its capture-time Unix timestamp.
-- `L1`: RAM slice, 40 records promoted from `L0` every 32 samples, so one promoted record represents about 64 seconds and one full slice covers about 42.7 minutes.
-- `L2`: flash ring, same 256-byte `SensorSlice` format as `L1`, written one full `L1` slice per flash page.
+- `L1`: RAM page, 40 records promoted from `L0` every 32 samples, so one promoted record represents about 64 seconds and one full page covers about 42.7 minutes.
+- `L2`: flash ring, same 256-byte `SensorPage` format as `L1`, written one full `L1` page per flash page.
 
 The `L2` flash area starts at `0x100000` and ends at `0x3FB000`, matching the `eagle.flash.4m.ld` layout that leaves the top flash sectors for EEPROM, RF calibration and WiFi data. This gives `12208` flash pages across `763` sectors. The writer advances at page granularity, but erases at 4 KiB sector granularity. When the ring wraps to the first page of the current head sector, it advances `headL2` by one sector, erases the target sector, writes the first new page, then fills the rest of that sector page-by-page.
 
@@ -72,7 +72,7 @@ After the flash ring is full, retained `L2` capacity ranges from `12193` pages j
 
 ## On-Flash Format and Recovery
 
-Each flash page stores one `SensorSlice`:
+Each flash page stores one `SensorPage`:
 
 ```text
 page[256]
@@ -92,7 +92,7 @@ value[4]
   0x3       humidDot   (u8)
 ```
 
-The page is exactly 256 bytes, matching the ESP8266 flash page write size. `timestamp` is the per-record second offset from the slice `unixOffset`, with the first record in each slice always stored as offset `0`. `L0` keeps only `SensorValue` entries plus the parallel absolute Unix timestamp array; `SensorRecord` is used by `L1` and `L2` where compact per-slice offsets are useful. `checksum` is CRC32 over `unixOffset` and the full records array.
+The page is exactly 256 bytes, matching the ESP8266 flash page write size. `timestamp` is the per-record second offset from the page `unixOffset`, with the first record in each page always stored as offset `0`. `L0` keeps only `SensorValue` entries plus the parallel absolute Unix timestamp array; `SensorRecord` is used by `L1` and `L2` where compact per-page offsets are useful. `checksum` is CRC32 over `unixOffset` and the full records array.
 
 On boot, recovery scans the whole `L2` flash range sector-by-sector, reading one full 4 KiB sector at a time into the shared static buffer and then inspecting its 16 pages in memory. Empty pages are treated as erased space, and all-empty sectors are skipped, so valid history can be recovered even when it starts at a later sector instead of at the beginning of flash. Inside one candidate chain, pages must be contiguous and ordered by `unixOffset`, which acts as the page's implicit monotonic identifier. In this firmware that is a practical ordering key because each page is written about every 42.7 minutes and `unixOffset` is not allowed to move backwards.
 

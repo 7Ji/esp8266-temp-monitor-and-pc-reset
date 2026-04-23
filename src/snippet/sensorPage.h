@@ -2,7 +2,7 @@
 #ifndef PRINTER
 #define PRINTER Serial.
 #endif
-struct SensorSlice {
+struct SensorPage {
   COMPCONST uint32_t const Magic = 0x82660C05;
   COMPCONST uint8_t const MaxRecords = 40;
   COMPCONST uint8_t const MaxRecordsSub1 = MaxRecords - 1;
@@ -40,23 +40,23 @@ struct SensorSlice {
     uint16_t timestampLast = 0, timestampThis;
     uint8_t recordID;
 
-    if (magic != SensorSlice::Magic) {
-      PRINTER printf("Slice magic not right (recorded %08" PRIx32 " != expected %08" PRIx32 ")\n", magic, SensorSlice::Magic);
+    if (magic != SensorPage::Magic) {
+      PRINTER printf("Page magic not right (recorded %08" PRIx32 " != expected %08" PRIx32 ")\n", magic, SensorPage::Magic);
       return false;
     }
     expectedChecksum = actualChecksum();
     if (checksum != expectedChecksum) {
-      PRINTER printf("Slice Checksum mismatch (recorded %08" PRIx32 " != expected %08" PRIx32")\n", checksum, expectedChecksum);
+      PRINTER printf("Page Checksum mismatch (recorded %08" PRIx32 " != expected %08" PRIx32")\n", checksum, expectedChecksum);
       return false;
     }
     if (records[0].timestamp != 0) {
-      PRINTER println("Slice first record timestamp is not 0");
+      PRINTER println("Page first record timestamp is not 0");
       return false;
     }
     for (recordID = 1; recordID < MaxRecords; ++recordID) {
       timestampThis = records[recordID].timestamp;
       if (timestampThis <= timestampLast) {
-        PRINTER printf("Slice record %" PRIu8 " timestamp jump back (%" PRIu16 " <= %" PRIu16 ")", recordID, timestampThis, timestampLast);
+        PRINTER printf("Page record %" PRIu8 " timestamp jump back (%" PRIu16 " <= %" PRIu16 ")", recordID, timestampThis, timestampLast);
         return false;
       }
       timestampLast = timestampThis;
