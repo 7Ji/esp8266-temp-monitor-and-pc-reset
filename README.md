@@ -98,6 +98,27 @@ On boot, recovery scans the whole `L2` flash range sector-by-sector, reading one
 
 If a sector read fails, a written page is invalid, a non-empty page appears after an empty page in the same sector, or `unixOffset` goes backwards, recovery closes the current candidate and continues scanning from the next recoverable sector. A backwards jump on the first page of a sector starts a new candidate at that sector, matching the sector-boundary ring-wrap behavior of the writer. After the scan, recovery chooses the candidate with the newest end timestamp, using the final record timestamp within the candidate's last page instead of only that page's base `unixOffset`. As a special case, if one candidate starts at the beginning of flash and another ends exactly at the end of flash, recovery joins them as a wrapped ring only when the beginning candidate is newer than the tail candidate; otherwise it keeps the newer candidate. This supports orphaned valid chunks in the middle of flash as well as the usual fresh chain and wrapped-ring layouts.
 
+## Binary Dump Format
+
+The `/dump` route returns all available history as `application/octet-stream`. Multi-byte integer fields are little-endian.
+
+```text
+dump_header[16]
+  0x00..0x02  magic       "E82" (bytes 0x45 0x38 0x32)
+  0x03        version     u8, currently 1
+  0x04..0x07  count       u32le, number of records following the header
+  0x08..0x0f  unixOffset  u64le, base Unix timestamp in seconds
+
+dump_record[8] repeated count times
+  0x00..0x03  timestamp   u32le, seconds after header unixOffset
+  0x04        tempInt     i8, integer part of temperature in Celsius
+  0x05        tempDot     u8, first decimal digit of temperature
+  0x06        humidInt    u8, integer part of relative humidity percentage
+  0x07        humidDot    u8, first decimal digit of relative humidity
+```
+
+The absolute Unix timestamp for each record is `header.unixOffset + record.timestamp`. The temperature value is `tempInt + tempDot / 10`; the humidity value is `humidInt + humidDot / 10`. Consumers should reject dumps shorter than 16 bytes, dumps with unsupported magic or version, and dumps whose byte length is not exactly `16 + count * 8`.
+
 ## Web Interface and API
 
 After boot, the firmware scans for the configured SSID, connects, prints the assigned IP address on the serial console, and starts an HTTP server on port `80`.
@@ -110,6 +131,7 @@ Current routes:
 - `/humid`: only the latest humidity
 - `/recent`: latest reading as `timestamp,temp,humidity`
 - `/history`: full available history, one sample per line as `timestamp,temp,humidity`
+- `/dump`: full available history as binary `application/octet-stream`; see Binary Dump Format
 - `/power`: authenticated `POST`, sends a short pulse on `PRIVATE_PIN_POWER`; requires header `Authorization: Bearer <PRIVATE_PC_AUTH>` and reply with `404` when unauthorized (to hide the route)
 - `/reset`: authenticated `POST`, sends a short pulse on `PRIVATE_PIN_RESET`; requires header `Authorization: Bearer <PRIVATE_PC_AUTH>` and reply with `404` when unauthorized (to hide the route)
 
