@@ -7,29 +7,28 @@
 static_assert(sizeof(unsigned long) == sizeof(uint32_t), "unsigned long (would return by millis) is not 32 bit");
 
 #include "root.html.h"
-#include "snippet/compConst.h"
 
-COMPCONST char const ConfigHostName[] = PRIVATE_HOSTNAME;
-COMPCONST char const ConfigWiFiSSID[] = PRIVATE_WIFI_SSID;
-COMPCONST char const ConfigWiFiPassword[] = PRIVATE_WIFI_PASSWORD;
-COMPCONST unsigned long const ConfigBaudRate = 115200;
+static inline constexpr char ConfigHostName[] = PRIVATE_HOSTNAME;
+static inline constexpr char ConfigWiFiSSID[] = PRIVATE_WIFI_SSID;
+static inline constexpr char ConfigWiFiPassword[] = PRIVATE_WIFI_PASSWORD;
+static inline constexpr unsigned long ConfigBaudRate = 115200;
 
-COMPCONST char const ErrorStringWouldTruncate[] PROGMEM = "String Would Truncate";
-COMPCONST char const ErrorStringFormatFailure[] PROGMEM = "String Format Failure";
-COMPCONST char const ErrorNotFound[] PROGMEM = "Not Found";
-COMPCONST char const PcPowerOk[] PROGMEM = "Power button pulse sent";
-COMPCONST char const PcResetOk[] PROGMEM = "Reset button pulse sent";
+static inline constexpr char ErrorStringWouldTruncate[] PROGMEM = "String Would Truncate";
+static inline constexpr char ErrorStringFormatFailure[] PROGMEM = "String Format Failure";
+static inline constexpr char ErrorNotFound[] PROGMEM = "Not Found";
+static inline constexpr char PcPowerOk[] PROGMEM = "Power button pulse sent";
+static inline constexpr char PcResetOk[] PROGMEM = "Reset button pulse sent";
 
-COMPCONST unsigned long const OneSecondAsMs = 1'000;
-COMPCONST uint8_t const MaxWaits = 20;
-COMPCONST uint8_t const PcPinPower =
+static inline constexpr unsigned long OneSecondAsMs = 1'000;
+static inline constexpr uint8_t MaxWaits = 20;
+static inline constexpr uint8_t PcPinPower =
 #ifdef PRIVATE_PIN_POWER
 PRIVATE_PIN_POWER
 #else
 D1
 #endif
 ;
-COMPCONST uint8_t const PcPinReset =
+static inline constexpr uint8_t PcPinReset =
 #ifdef PRIVATE_PIN_RESET
 PRIVATE_PIN_RESET
 #else
@@ -49,7 +48,7 @@ static ESP8266WebServer server(80);
 #define serverSendError(x) server.send_P(500, "text/plain", Error ## x, sizeof(Error ## x) - 1)
 
 struct UpTimer {
-  COMPCONST uint32_t const MillisSafeMax = UINT32_MAX - OneSecondAsMs;
+  static inline constexpr uint32_t MillisSafeMax = UINT32_MAX - OneSecondAsMs;
 
   uint32_t secondsOffset = 0;
   uint32_t millisOffset = 0;
@@ -79,16 +78,16 @@ struct UpTimer {
 static UpTimer upTimer = {};
 
 struct WiFiKeeper {
-  COMPCONST size_t const WantedLen = sizeof(ConfigWiFiSSID) - 1;
-  COMPCONST uint8_t const BssidSize = 6;
+  static inline constexpr size_t WantedLen = sizeof(ConfigWiFiSSID) - 1;
+  static inline constexpr uint8_t BssidSize = 6;
   /*
      0 ... 15 seconds : no reconnect
     15 ...    seconds : reconnect with current setup
     60 ...    seconds : reconnect with current setup, then rescan
   */
-  COMPCONST uint32_t const ThresholdDisconnect = 15000;
-  COMPCONST uint32_t const ThresholdReconnect = ThresholdDisconnect;
-  COMPCONST uint32_t const ThresholdScan = 60000;
+  static inline constexpr uint32_t ThresholdDisconnect = 15000;
+  static inline constexpr uint32_t ThresholdReconnect = ThresholdDisconnect;
+  static inline constexpr uint32_t ThresholdScan = 60000;
 
   uint8_t bssid[BssidSize] = {};
   uint8_t bssidLength = 0;
@@ -220,24 +219,24 @@ struct WiFiKeeper {
 static WiFiKeeper wifiKeeper = {};
 
 struct NtpSyncer {
-  COMPCONST uint32_t const MinInterval = 3600000UL;
-  COMPCONST uint32_t const NtpUnixOffset = 2208988800UL;
-  COMPCONST uint32_t const MinUnixOffset = 1776133834UL; /* Tue Apr 14 11:00:01 CST 2026, no specific reason */
-  COMPCONST uint32_t const MinNtp = NtpUnixOffset + MinUnixOffset;
-  COMPCONST size_t const BufferSize = 48;
-  COMPCONST uint16_t const NtpPortRemote = 123;
-  COMPCONST uint8_t const OffsetSecs = 40;
-  COMPCONST uint8_t const OffsetFrac = 44;
-  COMPCONST byte const NtpMagic = 0b11100011;
+  static inline constexpr uint32_t MinInterval = 3600000UL;
+  static inline constexpr uint32_t NtpUnixOffset = 2208988800UL;
+  static inline constexpr uint32_t MinUnixOffset = 1776133834UL; /* Tue Apr 14 11:00:01 CST 2026, no specific reason */
+  static inline constexpr uint32_t MinNtp = NtpUnixOffset + MinUnixOffset;
+  static inline constexpr size_t BufferSize = 48;
+  static inline constexpr uint16_t NtpPortRemote = 123;
+  static inline constexpr uint8_t OffsetSecs = 40;
+  static inline constexpr uint8_t OffsetFrac = 44;
+  static inline constexpr uint8_t NtpMagic = 0b11100011;
 
-  COMPCONST char NtpServer[] =
+  static inline constexpr char NtpServer[] =
 #ifdef PRIVATE_NTP_SERVER
     PRIVATE_NTP_SERVER
 #else
     "pool.ntp.org"
 #endif
       ;
-  COMPCONST uint16_t const NtpPortLocal =
+  static inline constexpr uint16_t NtpPortLocal =
 #ifdef PRIVATE_NTP_LOCAL_PORT
     PRIVATE_NTP_LOCAL_PORT
 #else
@@ -414,51 +413,39 @@ struct NtpSyncer {
 static NtpSyncer ntpSyncer = {};
 static_assert(SharedBufferSize >= NtpSyncer::BufferSize, "Shared buffer is smaller than NTP buffer");
 
-struct SensorValue {
-  COMPCONST int const lenBufferTempOrHumid = 8; /* extreme 255.255\0 */
-  COMPCONST int const lenBufferTempAndHumid = lenBufferTempOrHumid * 2; /* extreme 255.255,255.255\0 */
-  COMPCONST int const lenBuffer = lenBufferTempAndHumid + 22; /* extreme 18446744073709551615,255.255,255.255\n\0 */
-
-  int8_t tempInt;
-  uint8_t tempDot;
-  uint8_t humidInt;
-  uint8_t humidDot;
-
-  /* buffer should be at least lenBuffer */
-  bool intoStr(uint64_t const unixSeconds, char *const buffer, size_t &len) const {
-    int const r = snprintf(buffer, lenBuffer, "%" PRIu64 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", unixSeconds, tempInt, tempDot, humidInt, humidDot);
-
-    if (r < 0) {
-      serverSendError(StringFormatFailure);
-      return false;
-    } else if (r >= lenBuffer) {
-      serverSendError(StringWouldTruncate);
-      return false;
-    } else {
-      len = r;
-      return true;
-    }
-  }
-};
-
-static_assert(sizeof(struct SensorValue) == 4, "SensorValue should have a size of 4");
-
-struct SensorRecord {
-  uint16_t timestamp; /* second offset from page unixOffset */
-  SensorValue value;
-};
-
-static_assert(sizeof(struct SensorRecord) == 6, "SensorRecord should have a size of 6");
-
 #include "snippet/sensorPage.h"
-#include "snippet/flashStats.h"
+bool SensorValue::intoStr(uint64_t const unixSeconds, char *const buffer, size_t &len) const {
+  int const r = snprintf(buffer, lenBuffer, "%" PRIu64 ",%" PRId8 ".%" PRIu8 ",%" PRIu8 ".%" PRIu8 "\n", unixSeconds, tempInt, tempDot, humidInt, humidDot);
+
+  if (r < 0) {
+    serverSendError(StringFormatFailure);
+    return false;
+  } else if (r >= lenBuffer) {
+    serverSendError(StringWouldTruncate);
+    return false;
+  } else {
+    len = r;
+    return true;
+  }
+}
+uint32_t SensorPage::actualChecksum() const {
+  return crc32(&unixOffset, sizeof(unixOffset) + sizeof(records));
+}
 #include "snippet/recoverFlash.h"
+[[gnu::always_inline]] inline bool RecoverFlash::readFlashSector(uint16_t const flashSectorID) {
+  SpiFlashOpResult const opResult = spi_flash_read(flashSectorID << FlashStats::SectExp, sharedWordsBuffer, FlashStats::SectSize);
+  if (opResult != SPI_FLASH_RESULT_OK) {
+    PRINTF("Failed to read flash sector f%" PRIu16 " when recovering flash, opResult %d\n", flashSectorID, opResult);
+    return false;
+  }
+  return true;
+}
 
 struct SensorHistory {
-  COMPCONST uint32_t const MinInterval = 2000;
-  COMPCONST uint8_t const MaxHistoryL0 = 1 << 5; /* 2s * 32, even secondly, for about a minute */
+  static inline constexpr uint32_t MinInterval = 2000;
+  static inline constexpr uint8_t MaxHistoryL0 = 1 << 5; /* 2s * 32, even secondly, for about a minute */
 
-  COMPCONST uint8_t const RingMaskL0 = MaxHistoryL0 - 1;
+  static inline constexpr uint8_t RingMaskL0 = MaxHistoryL0 - 1;
 
   static_assert(sizeof(struct SensorPage) == FlashStats::PageSize, "SensorPage should have the same size as page");
 
@@ -889,7 +876,7 @@ struct AllSender {
 };
 
 struct HistoryEach {
-  COMPCONST size_t const lenMax = SharedBufferSize - SensorValue::lenBuffer;
+  static inline constexpr size_t lenMax = SharedBufferSize - SensorValue::lenBuffer;
 
   size_t len;
   size_t offset = 0;
@@ -926,8 +913,8 @@ struct DumpRecord {
 static_assert(sizeof(struct DumpRecord) == 8, "DumpRecord should have a size of 8");
 
 struct DumpEach {
-  COMPCONST size_t const lenMax = SharedBufferSize - sizeof(DumpRecord);
-  COMPCONST uint32_t const Magic = 0x01323845; /* E82\1 */
+  static inline constexpr size_t lenMax = SharedBufferSize - sizeof(DumpRecord);
+  static inline constexpr uint32_t Magic = 0x01323845; /* E82\1 */
 
   uint64_t unixOffset = history.firstUnixSeconds();
   size_t offset = 0;

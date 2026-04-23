@@ -1,8 +1,14 @@
 #pragma once
-#ifndef PRINTER
-#define PRINTER Serial.
-#endif
+
+#include <cstdint>
+
+#include "flashStats.h"
+#include "printer.h"
+#include "sensorPage.h"
+#include "sharedBuffer.h"
+
 namespace RecoverFlash {
+  static inline constexpr uint16_t WrittenBit = 0b1;
   struct PagesCandidate {
     uint64_t clockBegin, clockEnd;
     uint16_t head, count;
@@ -28,12 +34,12 @@ namespace RecoverFlash {
     }
   };
 
+  bool readFlashSector(uint16_t flashSectorID);
+
   [[gnu::always_inline]] inline void recoverPages(PagesCandidate &best, PagesCandidate &current, uint16_t &sectorID, uint16_t &flashSectorID) {
     static SensorPage const *SharedPagesBuffer = reinterpret_cast<SensorPage const *>(sharedBytesBuffer);
-    static constexpr uint16_t WrittenBit = 0b1;
 
     SensorPage const *page;
-    SpiFlashOpResult opResult;
     uint64_t unixThis, unixLast = 0;
     uint32_t *pageWordsBuffer;
     uint16_t pageID, flashPageID, writtenMask;
@@ -47,9 +53,7 @@ namespace RecoverFlash {
       ++sectorID,
       ++flashSectorID
     ) {
-      opResult = spi_flash_read(flashSectorID << FlashStats::SectExp, sharedWordsBuffer, FlashStats::SectSize);
-      if (opResult != SPI_FLASH_RESULT_OK) {
-        PRINTER printf("Failed to read sector %" PRIu16 "/f%" PRIu16 " when recovering flash\n", sectorID, sectorID);
+      if (!readFlashSector(flashSectorID)) {
         best.maybeReplaceBeforeSector(current, sectorID++);
         ++flashSectorID;
         return;
@@ -99,13 +103,13 @@ namespace RecoverFlash {
           continue;
         }
         if (emptyCount) { /* Non-empty page after empty */
-          PRINTER printf("Non-empty page %" PRIu16 "/f%" PRIu16 " appears after empty page in same sector\n", pageID, flashPageID);
+          PRINTF("Non-empty page %" PRIu16 "/f%" PRIu16 " appears after empty page in same sector\n", pageID, flashPageID);
           best.maybeReplaceBeforeSector(current, sectorID++);
           ++flashSectorID;
           return;
         }
         if (!page->valid()) { /* Invalid page */
-          PRINTER printf("Invalid page %" PRIu16 "/f%" PRIu16 "\n", pageID, flashPageID);
+          PRINTF("Invalid page %" PRIu16 "/f%" PRIu16 "\n", pageID, flashPageID);
           best.maybeReplaceBeforeSector(current, sectorID++);
           ++flashSectorID;
           return;
@@ -116,12 +120,12 @@ namespace RecoverFlash {
         }
         if (unixThis <= unixLast) { /* Jumping back, allowed only once, and only for the first page in sector */
           if (pageID & FlashStats::PageInSectMask) { /* Not first page in sector */
-            PRINTER printf("Page %" PRIu16 "/f%" PRIu16 " jump back and it's not the first page in sector\n", pageID, flashPageID);
+            PRINTF("Page %" PRIu16 "/f%" PRIu16 " jump back and it's not the first page in sector\n", pageID, flashPageID);
             best.maybeReplaceBeforeSector(current, sectorID++);
             ++flashSectorID;
             return;
           } else { /* First page in sector, this is head of second part */
-            PRINTER printf("Page %" PRIu16 "/f%" PRIu16 " jump back and it's the first page in sector, consider this sector as head of next chain of pages\n", pageID, flashPageID);
+            PRINTF("Page %" PRIu16 "/f%" PRIu16 " jump back and it's the first page in sector, consider this sector as head of next chain of pages\n", pageID, flashPageID);
             best.maybeReplaceBeforeSector(current, sectorID);
             return;
           }
@@ -148,7 +152,7 @@ namespace RecoverFlash {
     PagesCandidate best = {}, last = {};
     uint64_t clockBeginFirst = 0;
 
-    PRINTER println("Recovering on-flash records...");
+    PRINTLN("Recovering on-flash records...");
 
     /* The pages at head are special, they could be the tail-wrapped-around part of a ring */
     recoverPages(best, last, sectorID, flashSectorID);
@@ -164,13 +168,13 @@ namespace RecoverFlash {
       last.head &&
       (last.head << FlashStats::SectPageFactor) + last.count == FlashStats::PageTotal &&
       clockBeginFirst > last.clockEnd) {
-      PRINTER println("Recovered wrapped ring");
+      PRINTLN("Recovered wrapped ring");
       headL2 = last.head;
       countL2 = last.count + countFirst;
     } else {
       headL2 = best.head;
       countL2 = best.count;
     }
-    PRINTER printf("Recovered %" PRIu16 " pages from flash, head is %" PRIu16 "\n", countL2, headL2);
+    PRINTF("Recovered %" PRIu16 " pages from flash, head is %" PRIu16 "\n", countL2, headL2);
   }
 }

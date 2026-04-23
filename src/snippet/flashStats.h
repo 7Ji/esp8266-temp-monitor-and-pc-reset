@@ -1,22 +1,24 @@
 #pragma once
-#include "compConst.h"
+
+#include <cstdint>
+
 namespace FlashStats {
-  COMPCONST uint32_t const AddrStart = 0x100000;
-  COMPCONST uint32_t const AddrEnd = 0x3FB000;
-  COMPCONST int const SectExp = 12;
-  COMPCONST uint16_t const SectSize = 1 << SectExp; /* 4096 */
-  COMPCONST uint16_t const SectStart = AddrStart / SectSize;
-  COMPCONST uint16_t const SectEnd = AddrEnd / SectSize;
-  COMPCONST uint16_t const SectTotal = SectEnd - SectStart;
-  COMPCONST int const PageExp = 8;
-  COMPCONST int const SectPageFactor = SectExp - PageExp;
-  COMPCONST uint8_t const SectPageCount = 1 << SectPageFactor;
-  COMPCONST uint16_t const SectWordCount = SectSize / sizeof(uint32_t);
-  COMPCONST uint16_t const PageSize = 1 << PageExp; /* 256 */
-  COMPCONST uint16_t const PageInSectMask = SectPageCount - 1;
-  COMPCONST uint16_t const PageStart = AddrStart / PageSize;
-  COMPCONST uint16_t const PageEnd = AddrEnd / PageSize;
-  COMPCONST uint16_t const PageTotal = PageEnd - PageStart;
-  COMPCONST uint16_t const PageTotalSubSect = PageTotal - SectPageCount;
-  COMPCONST uint8_t const PageWordCount = PageSize / sizeof(uint32_t);
+  static inline constexpr uint32_t AddrStart = 0x100000;
+  static inline constexpr uint32_t AddrEnd = 0x3FB000;
+  static inline constexpr int SectExp = 12;
+  static inline constexpr uint16_t SectSize = 1 << SectExp; /* 4096 */
+  static inline constexpr uint16_t SectStart = AddrStart / SectSize;
+  static inline constexpr uint16_t SectEnd = AddrEnd / SectSize;
+  static inline constexpr uint16_t SectTotal = SectEnd - SectStart;
+  static inline constexpr int PageExp = 8;
+  static inline constexpr int SectPageFactor = SectExp - PageExp;
+  static inline constexpr uint8_t SectPageCount = 1 << SectPageFactor;
+  static inline constexpr uint16_t SectWordCount = SectSize / sizeof(uint32_t);
+  static inline constexpr uint16_t PageSize = 1 << PageExp; /* 256 */
+  static inline constexpr uint16_t PageInSectMask = SectPageCount - 1;
+  static inline constexpr uint16_t PageStart = AddrStart / PageSize;
+  static inline constexpr uint16_t PageEnd = AddrEnd / PageSize;
+  static inline constexpr uint16_t PageTotal = PageEnd - PageStart;
+  static inline constexpr uint16_t PageTotalSubSect = PageTotal - SectPageCount;
+  static inline constexpr uint8_t PageWordCount = PageSize / sizeof(uint32_t);
 }

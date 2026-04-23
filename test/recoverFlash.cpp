@@ -12,46 +12,34 @@
 #include "snippet/sharedBuffer.h"
 
 typedef int SpiFlashOpResult;
-COMPCONST SpiFlashOpResult SPI_FLASH_RESULT_OK = 0;
+static inline constexpr SpiFlashOpResult SPI_FLASH_RESULT_OK = 0;
 
 namespace Printer {
   using std::printf;
   static constexpr auto println = std::puts;
 };
 
-struct SensorValue {
-  int8_t tempInt;
-  uint8_t tempDot;
-  uint8_t humidInt;
-  uint8_t humidDot;
-};
-
-struct SensorRecord {
-  uint16_t timestamp;
-  SensorValue value;
-};
-
-static uint32_t crc32 (void const* const data, size_t length, uint32_t crc = 0xffffffff)
-{
-    uint8_t const* ldata = (uint8_t const*)data;
-    while (length--)
-    {
-        uint8_t c = *(ldata++);
-        for (uint32_t i = 0x80; i > 0; i >>= 1)
-        {
-            bool bit = crc & 0x80000000;
-            if (c & i)
-                bit = !bit;
-            crc <<= 1;
-            if (bit)
-                crc ^= 0x04c11db7;
-        }
-    }
-    return crc;
-}
-
-#define PRINTER Printer::
 #include "snippet/sensorPage.h"
+uint32_t SensorPage::actualChecksum() const {
+  size_t length = sizeof(unixOffset) + sizeof(records);
+  uint32_t crc = 0xffffffff;
+
+  uint8_t const* ldata = reinterpret_cast<uint8_t const*>(&unixOffset);
+  while (length--)
+  {
+      uint8_t c = *(ldata++);
+      for (uint32_t i = 0x80; i > 0; i >>= 1)
+      {
+          bool bit = crc & 0x80000000;
+          if (c & i)
+              bit = !bit;
+          crc <<= 1;
+          if (bit)
+              crc ^= 0x04c11db7;
+      }
+  }
+  return crc;
+}
 
 static uint8_t buffer[FlashStats::AddrEnd];
 static void *const bufferPages = buffer + FlashStats::AddrStart;
@@ -70,8 +58,17 @@ SpiFlashOpResult spi_flash_read(size_t const offset, void *const target, size_t 
   return SPI_FLASH_RESULT_OK;
 }
 
-#define PRINTER Printer::
 #include "snippet/recoverFlash.h"
+[[gnu::always_inline]] inline bool RecoverFlash::readFlashSector(uint16_t const flashSectorID) {
+  if (!brokenBufferSectors.empty()) {
+    if (std::binary_search(brokenBufferSectors.begin(), brokenBufferSectors.end(), flashSectorID - FlashStats::SectStart)) {
+      std::printf("Failed to read flash sector f%" PRIu16 " when recovering flash\n", flashSectorID);
+      return false;
+    }
+  }
+  std::memcpy(sharedBytesBuffer, buffer + (flashSectorID << FlashStats::SectExp), FlashStats::SectSize);
+  return true;
+}
 
 struct PagePlan {
   uint16_t offset, count;
@@ -138,14 +135,14 @@ struct Tester {
   }
 };
 
-COMPCONST uint16_t const SectorsFirstHalf = FlashStats::SectTotal / 2;
-COMPCONST uint16_t const PagesFirstHalf = SectorsFirstHalf << FlashStats::SectPageFactor;
-COMPCONST uint16_t const PagesFirstHalfSubSect = PagesFirstHalf - FlashStats::SectPageCount;
-COMPCONST uint16_t const PagesSecondHalf = FlashStats::PageTotal - PagesFirstHalf;
-COMPCONST uint16_t const SectorsMiddle = FlashStats::SectTotal / 3;
-COMPCONST uint16_t const PagesMiddle = SectorsMiddle << FlashStats::SectPageFactor;
-COMPCONST uint16_t const SectorsMiddleLater = SectorsMiddle + 4;
-COMPCONST uint16_t const PagesMiddleLater = SectorsMiddleLater << FlashStats::SectPageFactor;
+static inline constexpr uint16_t SectorsFirstHalf = FlashStats::SectTotal / 2;
+static inline constexpr uint16_t PagesFirstHalf = SectorsFirstHalf << FlashStats::SectPageFactor;
+static inline constexpr uint16_t PagesFirstHalfSubSect = PagesFirstHalf - FlashStats::SectPageCount;
+static inline constexpr uint16_t PagesSecondHalf = FlashStats::PageTotal - PagesFirstHalf;
+static inline constexpr uint16_t SectorsMiddle = FlashStats::SectTotal / 3;
+static inline constexpr uint16_t PagesMiddle = SectorsMiddle << FlashStats::SectPageFactor;
+static inline constexpr uint16_t SectorsMiddleLater = SectorsMiddle + 4;
+static inline constexpr uint16_t PagesMiddleLater = SectorsMiddleLater << FlashStats::SectPageFactor;
 
 int main() {
   Tester tester = {};
