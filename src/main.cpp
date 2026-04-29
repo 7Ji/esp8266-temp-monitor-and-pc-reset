@@ -834,26 +834,32 @@ struct AllSender {
 
   void sendAll() {
     uint8_t countLast;
-    uint16_t sectorCount, sectorCountFirst, sectorOffset, sectorID;
+    uint16_t sectorCount, sectorCountFirst, sectorID, sectorEnd;
 
     if (history.countL2 > 0) {
       sectorCount = history.countL2 >> FlashStats::SectPageFactor;
-      countLast = history.countL2 & FlashStats::PageInSectMask;
-      sectorOffset = history.headL2;
-      if (sectorOffset > 0) {
-        sectorCountFirst = FlashStats::SectTotal - sectorOffset;
-        if (sectorCountFirst > sectorCount) {
-          sectorCountFirst = sectorCount;
+      if (history.headL2 > 0) {
+        sectorEnd = history.headL2 + sectorCount;
+        if (sectorEnd > FlashStats::SectTotal) {
+          sectorCountFirst = sectorEnd - FlashStats::SectTotal;
+          sectorEnd = FlashStats::SectTotal;
+        } else {
+          sectorCountFirst = 0;
         }
-        for (sectorID = sectorOffset; sectorID < sectorOffset + sectorCountFirst; ++sectorID) {
+        for (sectorID = history.headL2; sectorID < sectorEnd; ++sectorID) {
           sendSector(sectorID, FlashStats::SectPageCount);
         }
-        sectorOffset += sectorCountFirst;
-        sectorCount -= sectorCountFirst;
+        if (sectorCountFirst) {
+          for (sectorID = 0; sectorID < sectorCountFirst; ++sectorID) {
+            sendSector(sectorID, FlashStats::SectPageCount);
+          }
+        }
+      } else {
+        for (sectorID = 0; sectorID < sectorCount; ++sectorID) {
+          sendSector(sectorID, FlashStats::SectPageCount);
+        }
       }
-      for (sectorID = 0; sectorID < sectorCount; ++sectorID) {
-        sendSector(sectorID, FlashStats::SectPageCount);
-      }
+      countLast = history.countL2 & FlashStats::PageInSectMask;
       if (countLast > 0) {
         sendSector(sectorID, countLast);
       }

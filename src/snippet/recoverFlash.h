@@ -120,12 +120,12 @@ namespace RecoverFlash {
         }
         if (unixThis <= unixLast) { /* Jumping back, allowed only once, and only for the first page in sector */
           if (pageID & FlashStats::PageInSectMask) { /* Not first page in sector */
-            PRINTF("Page %" PRIu16 "/f%" PRIu16 " jump back and it's not the first page in sector\n", pageID, flashPageID);
+            PRINTF("Page %" PRIu16 "/f%" PRIu16 " jump back (%" PRIu64 " <= %" PRIu64 ") and it's not the first page in sector\n", pageID, flashPageID, unixThis, unixLast);
             best.maybeReplaceBeforeSector(current, sectorID++);
             ++flashSectorID;
             return;
           } else { /* First page in sector, this is head of second part */
-            PRINTF("Page %" PRIu16 "/f%" PRIu16 " jump back and it's the first page in sector, consider this sector as head of next chain of pages\n", pageID, flashPageID);
+            PRINTF("Page %" PRIu16 "/f%" PRIu16 " jump back (%" PRIu64 " <= %" PRIu64 ") and it's the first page in sector, consider this sector as head of next chain of pages\n", pageID, flashPageID, unixThis, unixLast);
             best.maybeReplaceBeforeSector(current, sectorID);
             return;
           }
