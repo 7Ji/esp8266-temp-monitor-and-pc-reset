@@ -681,7 +681,7 @@ struct SensorHistory {
     SensorPage *page;
 
     if (countL2 > 0 && (page = fetchPageL2(historyPage(countL2 - 1))) != nullptr) {
-      ntpSyncer.ensureUnixSeconds(millisCurrent, page->unixOffset + page->records[SensorPage::MaxRecordsSub1].timestamp);
+      ntpSyncer.ensureUnixSeconds(millisCurrent, page->unixOffset + (page->records[SensorPage::MaxRecordsSub1].timestamp - 1));
     }
     dht.begin();
     fetchAppend(millisCurrent);
