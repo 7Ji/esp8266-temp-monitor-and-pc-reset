@@ -315,8 +315,8 @@
       return Math.max(minValue, Math.min(maxValue, value));
     }
 
-    function getEntryAxisMs(entry) {
-      return entry && Number.isFinite(entry.timestamp) ? entry.timestamp * 1000 : NaN;
+    function getEntryAxisSecond(entry) {
+      return entry && Number.isFinite(entry.timestamp) ? entry.timestamp : NaN;
     }
 
     function formatWallClockMs(wallClockMs) {
@@ -338,6 +338,10 @@
 
     function formatGraphTimestamp(entry) {
       return entry && Number.isFinite(entry.timestamp) ? formatWallClockMs(entry.timestamp * 1000) : '--';
+    }
+
+    function formatGraphAxisSecond(axisSecond) {
+      return Number.isFinite(axisSecond) ? formatWallClockMs(axisSecond * 1000) : '--';
     }
 
     function nextBoundaryAfter(boundaryUnit, wallClockMs) {
@@ -443,18 +447,40 @@
       }
     }
 
-    function entriesForWindow(windowSeconds) {
-      if (windowSeconds == null) {
-        return historyEntries.slice();
+    function timeRangeForWindow(windowSeconds) {
+      const anchorSecond = getEntryAxisSecond(historyEntries[historyEntries.length - 1]);
+      if (!Number.isFinite(anchorSecond)) {
+        return null;
       }
 
-      const anchorAxisMs = getEntryAxisMs(historyEntries[historyEntries.length - 1]);
-      if (!Number.isFinite(anchorAxisMs)) {
+      if (windowSeconds == null) {
+        const firstSecond = getEntryAxisSecond(historyEntries[0]);
+        if (!Number.isFinite(firstSecond)) {
+          return null;
+        }
+
+        return {
+          startSecond: firstSecond,
+          endSecond: anchorSecond,
+        };
+      }
+
+      return {
+        startSecond: anchorSecond - windowSeconds,
+        endSecond: anchorSecond,
+      };
+    }
+
+    function entriesForWindow(windowSeconds, range) {
+      const selectedRange = range || timeRangeForWindow(windowSeconds);
+      if (!selectedRange) {
         return [];
       }
 
-      const earliestAxisMs = anchorAxisMs - windowSeconds * 1000;
-      return historyEntries.filter((entry) => getEntryAxisMs(entry) >= earliestAxisMs);
+      return historyEntries.filter((entry) => {
+        const entrySecond = getEntryAxisSecond(entry);
+        return entrySecond >= selectedRange.startSecond && entrySecond <= selectedRange.endSecond;
+      });
     }
 
     function formatSummary(entries) {
@@ -509,7 +535,7 @@
       return ctx;
     }
 
-    function drawGraph(config, entries) {
+    function drawGraph(config, entries, range) {
       const canvas = document.getElementById(config.canvasId);
       const ctx = prepareCanvasContext(canvas);
       const width = canvas.clientWidth || canvas.width;
@@ -526,8 +552,72 @@
       ctx.strokeStyle = '#ddd';
       ctx.strokeRect(0, 0, width, height);
 
-      if (entries.length < 2) {
-        drawEmptyGraph(canvas, 'Not enough samples for a graph yet.');
+      if (
+        !range ||
+        !Number.isFinite(range.startSecond) ||
+        !Number.isFinite(range.endSecond) ||
+        range.endSecond < range.startSecond
+      ) {
+        drawEmptyGraph(canvas, 'No samples in this range yet.');
+        return;
+      }
+
+      const firstTime = range.startSecond;
+      const lastTime = range.endSecond;
+      const timeSpan = Math.max(1, lastTime - firstTime);
+
+      function xForAxisSecond(axisSecond) {
+        return marginLeft + (axisSecond - firstTime) * (width - marginLeft - marginRight) / timeSpan;
+      }
+
+      function xFor(entry) {
+        return xForAxisSecond(getEntryAxisSecond(entry));
+      }
+
+      function drawFrame() {
+        ctx.strokeStyle = '#bbb';
+        ctx.beginPath();
+        ctx.moveTo(marginLeft, marginTop);
+        ctx.lineTo(marginLeft, height - marginBottom);
+        ctx.lineTo(width - marginRight, height - marginBottom);
+        ctx.moveTo(width - marginRight, marginTop);
+        ctx.lineTo(width - marginRight, height - marginBottom);
+        ctx.stroke();
+
+        if (config.boundaryUnit) {
+          let boundaryMs = nextBoundaryAfter(config.boundaryUnit, firstTime * 1000);
+
+          ctx.save();
+          ctx.setLineDash([2, 4]);
+          ctx.strokeStyle = '#d0d0d0';
+          while (Number.isFinite(boundaryMs) && boundaryMs < lastTime * 1000) {
+            const boundaryX = xForAxisSecond(boundaryMs / 1000);
+            ctx.beginPath();
+            ctx.moveTo(boundaryX, marginTop);
+            ctx.lineTo(boundaryX, height - marginBottom);
+            ctx.stroke();
+            boundaryMs = advanceBoundary(config.boundaryUnit, boundaryMs);
+          }
+          ctx.restore();
+        }
+
+        ctx.textBaseline = 'alphabetic';
+        ctx.font = '12px monospace';
+        ctx.fillStyle = '#444';
+        ctx.textAlign = 'left';
+        ctx.fillText(formatGraphAxisSecond(firstTime), marginLeft, height - 8);
+        ctx.textAlign = 'right';
+        ctx.fillText(formatGraphAxisSecond(lastTime), width - marginRight, height - 8);
+      }
+
+      drawFrame();
+
+      if (entries.length === 0) {
+        ctx.fillStyle = '#555';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = '14px monospace';
+        ctx.fillText('No samples in this range yet.', width / 2, height / 2);
         return;
       }
 
@@ -551,15 +641,8 @@
         maxHumidity += 1;
       }
 
-      const firstTime = getEntryAxisMs(entries[0]);
-      const lastTime = getEntryAxisMs(entries[entries.length - 1]);
-      const timeSpan = Math.max(1, lastTime - firstTime);
       const temperatureSpan = maxTemperature - minTemperature;
       const humiditySpan = maxHumidity - minHumidity;
-
-      function xFor(entry) {
-        return marginLeft + (getEntryAxisMs(entry) - firstTime) * (width - marginLeft - marginRight) / timeSpan;
-      }
 
       function yForTemperature(value) {
         return height - marginBottom - (value - minTemperature) * (height - marginTop - marginBottom) / temperatureSpan;
@@ -568,15 +651,6 @@
       function yForHumidity(value) {
         return height - marginBottom - (value - minHumidity) * (height - marginTop - marginBottom) / humiditySpan;
       }
-
-      ctx.strokeStyle = '#bbb';
-      ctx.beginPath();
-      ctx.moveTo(marginLeft, marginTop);
-      ctx.lineTo(marginLeft, height - marginBottom);
-      ctx.lineTo(width - marginRight, height - marginBottom);
-      ctx.moveTo(width - marginRight, marginTop);
-      ctx.lineTo(width - marginRight, height - marginBottom);
-      ctx.stroke();
 
       ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
@@ -588,27 +662,21 @@
       ctx.textAlign = 'right';
       ctx.fillText(minHumidity.toFixed(1), width - 4, height - marginBottom + 12);
       ctx.fillText(maxHumidity.toFixed(1), width - 4, marginTop + 4);
-      ctx.fillStyle = '#444';
-      ctx.textAlign = 'left';
-      ctx.fillText(formatGraphTimestamp(entries[0]), marginLeft, height - 8);
-      ctx.textAlign = 'right';
-      ctx.fillText(formatGraphTimestamp(entries[entries.length - 1]), width - marginRight, height - 8);
 
-      if (config.boundaryUnit) {
-        let boundaryMs = nextBoundaryAfter(config.boundaryUnit, firstTime);
+      if (entries.length === 1) {
+        const onlyEntry = entries[0];
+        const x = xFor(onlyEntry);
 
-        ctx.save();
-        ctx.setLineDash([2, 4]);
-        ctx.strokeStyle = '#d0d0d0';
-        while (Number.isFinite(boundaryMs) && boundaryMs < lastTime) {
-          const boundaryX = marginLeft + (boundaryMs - firstTime) * (width - marginLeft - marginRight) / timeSpan;
-          ctx.beginPath();
-          ctx.moveTo(boundaryX, marginTop);
-          ctx.lineTo(boundaryX, height - marginBottom);
-          ctx.stroke();
-          boundaryMs = advanceBoundary(config.boundaryUnit, boundaryMs);
-        }
-        ctx.restore();
+        ctx.fillStyle = '#c62828';
+        ctx.beginPath();
+        ctx.arc(x, yForTemperature(onlyEntry.temperature), 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#1565c0';
+        ctx.beginPath();
+        ctx.arc(x, yForHumidity(onlyEntry.humidity), 3, 0, Math.PI * 2);
+        ctx.fill();
+        return;
       }
 
       ctx.strokeStyle = '#c62828';
@@ -693,18 +761,22 @@
 
     function drawAllGraphs() {
       graphConfigs.forEach((config) => {
-        const entries = entriesForWindow(config.windowSeconds);
+        const range = timeRangeForWindow(config.windowSeconds);
+        const entries = entriesForWindow(config.windowSeconds, range);
         document.getElementById(config.summaryId).textContent = formatSummary(entries);
-        drawGraph(config, entries);
+        drawGraph(config, entries, range);
       });
     }
 
     function updateHoverFromMouse(config, event) {
       const canvas = document.getElementById(config.canvasId);
       const rect = canvas.getBoundingClientRect();
-      const mouseX = (event.clientX - rect.left) * canvas.width / rect.width;
-      const mouseY = (event.clientY - rect.top) * canvas.height / rect.height;
-      const entries = entriesForWindow(config.windowSeconds);
+      const graphWidth = canvas.clientWidth || rect.width || canvas.width;
+      const graphHeight = canvas.clientHeight || rect.height || canvas.height;
+      const mouseX = event.clientX - rect.left;
+      const mouseY = event.clientY - rect.top;
+      const range = timeRangeForWindow(config.windowSeconds);
+      const entries = entriesForWindow(config.windowSeconds, range);
       const state = graphStates[config.key];
       const marginLeft = 52;
       const marginRight = 52;
@@ -715,25 +787,26 @@
       state.hoverMouseY = mouseY;
 
       if (
-        entries.length < 2 ||
+        entries.length < 1 ||
+        !range ||
         mouseX < marginLeft ||
-        mouseX > canvas.width - marginRight ||
+        mouseX > graphWidth - marginRight ||
         mouseY < marginTop ||
-        mouseY > canvas.height - marginBottom
+        mouseY > graphHeight - marginBottom
       ) {
         state.hoverIndex = -1;
-        drawGraph(config, entries);
+        drawGraph(config, entries, range);
         return;
       }
 
-      const firstTime = getEntryAxisMs(entries[0]);
-      const lastTime = getEntryAxisMs(entries[entries.length - 1]);
+      const firstTime = range.startSecond;
+      const lastTime = range.endSecond;
       const timeSpan = Math.max(1, lastTime - firstTime);
       let bestIndex = 0;
       let bestDistance = Infinity;
 
       entries.forEach((entry, index) => {
-        const x = marginLeft + (getEntryAxisMs(entry) - firstTime) * (canvas.width - marginLeft - marginRight) / timeSpan;
+        const x = marginLeft + (getEntryAxisSecond(entry) - firstTime) * (graphWidth - marginLeft - marginRight) / timeSpan;
         const distance = Math.abs(x - mouseX);
         if (distance < bestDistance) {
           bestDistance = distance;
@@ -742,7 +815,7 @@
       });
 
       state.hoverIndex = bestIndex;
-      drawGraph(config, entries);
+      drawGraph(config, entries, range);
     }
 
     function initializeGraphInteraction() {
@@ -755,7 +828,8 @@
         });
         canvas.addEventListener('mouseleave', () => {
           state.hoverIndex = -1;
-          drawGraph(config, entriesForWindow(config.windowSeconds));
+          const range = timeRangeForWindow(config.windowSeconds);
+          drawGraph(config, entriesForWindow(config.windowSeconds, range), range);
         });
       });
     }
