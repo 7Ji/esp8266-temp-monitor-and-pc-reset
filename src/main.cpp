@@ -404,7 +404,7 @@ struct NtpSyncer {
 
   [[gnu::always_inline]] inline void maybeUpdate(uint32_t const millisCurrent) {
     /* Force update if not initialized yet, or */
-    if ((millisCurrent - millisLast) >= MinInterval || !init) {
+    if (wifiKeeper.connected && ((millisCurrent - millisLast) >= MinInterval || !init)) {
       update(millisCurrent);
     }
   }
